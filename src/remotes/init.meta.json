@@ -1,0 +1,20 @@
+{
+  "className": "Folder",
+  "children": {
+    "BatchUpdate": {
+      "className": "RemoteEvent"
+    },
+    "ClientReady": {
+      "className": "RemoteEvent"
+    },
+    "SendTroops": {
+      "className": "RemoteEvent"
+    },
+    "PlaceBuilding": {
+      "className": "RemoteEvent"
+    },
+    "RetreatTroops": {
+      "className": "RemoteEvent"
+    }
+  }
+}

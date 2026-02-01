@@ -1,0 +1,99 @@
+{
+  "name": "RobloxMapTests",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "Packager": {
+        "$path": "src/Packager.luau"
+      },
+      "Client": {
+        "$className": "Folder",
+        "$path": "src/client"
+      },
+      "Shared": {
+        "$className": "Folder",
+        "$path": "src/shared"
+      }
+    },
+
+    "ServerStorage": {
+      "Server": {
+        "$className": "Folder",
+        "$path": "src/server"
+      }
+    },
+
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/Server.server.luau"
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/Client.client.luau"
+        }
+      }
+    },
+
+    "Workspace": {
+      "$properties": {
+        "FilteringEnabled": true
+      },
+      "Nodes": {
+        "$className": "Folder"
+      },
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Material": "Wood",
+          "Anchored": true,
+          "Color": [
+            0.38823,
+            0.37254,
+            0.38823
+          ],
+          "Locked": true,
+          "Position": [
+            0,
+            -10,
+            0
+          ],
+          "Size": [
+            2048,
+            20,
+            2048
+          ]
+        },
+        "SurfaceGui": {
+          "$className": "SurfaceGui",
+          "$properties": {
+            "Face": "Top",
+            "LightInfluence": 0,
+            "ZIndexBehavior": "Sibling"
+          }
+        }
+      }
+    },
+    "Lighting": {
+      "$properties": {
+        "Ambient": [
+          0,
+          0,
+          0
+        ],
+        "Brightness": 2,
+        "GlobalShadows": true,
+        "Outlines": false,
+        "Technology": "Voxel"
+      }
+    },
+    "SoundService": {
+      "$properties": {
+        "RespectFilteringEnabled": true
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+- add a menu for between matches - current
+- map + gamemode voting
+- top bar showing % of map owned
+- troops combine if going to the same end goal node, and within distance
+- make buildings take time to build
+- make it so i can also select nodes that have my troops in a battle
+- update building model colors, and change model when building changes + updates color on ownership change
+- fix minor troop network issues ( seeing troops across the map )
+- settings + birds eye
+- add models for factory and capitol
+- game start notification
+- coop other players
+
+### later
+- cyl inside selection ( easier to see? )
+- research building
+- research building adds research points to the team
+- team can unlock buildings/ upgrades? in research
+- rework map generation
+- matchmaking
+- rank system
+- skins + purchasable method
+- auto tournament setup for weekends - rewards skins + levels?
+- trade skins?
+- mini ai bots ( like civ barbarians )
