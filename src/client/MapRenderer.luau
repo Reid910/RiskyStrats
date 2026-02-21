@@ -1,5 +1,7 @@
 local MapRenderer = {}
 
+local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
+
 local Nodes_folder = nil
 local Baseplate_ui = nil
 local ExpndMulti = 5
@@ -163,20 +165,6 @@ function MapRenderer.RenderMap(mapData)
 
 	local teamData = mapData.teamData or {}
 
-	-- Team colors
-	local teamColors = {
-		Red = Color3.fromRGB(255, 85, 85),
-		Blue = Color3.fromRGB(85, 170, 255),
-		Green = Color3.fromRGB(85, 255, 127),
-		Yellow = Color3.fromRGB(255, 255, 127),
-		Neutral = Color3.fromRGB(180, 180, 180),
-	}
-
-	-- Neutral/contested/ghost colors
-	local neutralColor = Color3.fromRGB(180, 180, 180)
-	local contestedColor = Color3.fromRGB(128, 128, 128) -- Grey for contested
-	local ghostColor = Color3.fromRGB(100, 100, 100) -- Darker grey for ghost nodes
-
 	-- Track which nodes we've seen in this update
 	local seenNodes = {}
 
@@ -192,7 +180,7 @@ function MapRenderer.RenderMap(mapData)
 
 		-- Process troop data
 		local troopText = "0"
-		local color = neutralColor
+		local color = TeamColors.Neutral
 		local isContested = false
 		local totalTroops = 0
 		local isGhostNode = false
@@ -200,7 +188,7 @@ function MapRenderer.RenderMap(mapData)
 		-- Check if this is a ghost node (no troop data from server)
 		if not nodeTroops then
 			isGhostNode = true
-			color = ghostColor
+			color = TeamColors.Ghost
 		elseif type(nodeTroops) == "table" then
 			-- Count teams and total troops
 			local teamsWithTroops = {}
@@ -214,16 +202,16 @@ function MapRenderer.RenderMap(mapData)
 			if #teamsWithTroops == 0 then
 				-- No troops = neutral node with 0
 				troopText = "0"
-				color = neutralColor
+				color = TeamColors.Neutral
 			elseif #teamsWithTroops == 1 then
 				-- Single team owns this node
 				local team = teamsWithTroops[1]
 				troopText = tostring(math.floor(team.count))
-				color = teamColors[team.name] or neutralColor
+				color = TeamColors.GetColor(team.name)
 			else
 				-- Contested! Multiple teams
 				isContested = true
-				color = contestedColor
+				color = TeamColors.Contested
 
 				-- Build multi-line text: "Red: 50\nBlue: 30"
 				local lines = {}
@@ -238,12 +226,12 @@ function MapRenderer.RenderMap(mapData)
 			-- Legacy support: single number
 			troopText = tostring(nodeTroops)
 			totalTroops = nodeTroops
-			color = owner and teamColors[owner] or neutralColor
+			color = TeamColors.GetColor(owner)
 		end
 
 		-- If no troops but has owner, still show owner color
 		if totalTroops == 0 and owner then
-			color = teamColors[owner] or neutralColor
+			color = TeamColors.GetColor(owner)
 		end
 
 		-- Try to update existing node first

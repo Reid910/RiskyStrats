@@ -66,6 +66,8 @@ function Buildings.PlaceBuilding(player, nodeId, buildingType)
 			warn(`Node {nodeId} already has a {buildingType}`)
 			return false
 		end
+		-- Allow replacing existing building (will be overwritten below)
+		print(`Replacing {existingBuilding.type} with {buildingType} on node {nodeId}`)
 	end
 
 	-- Get building config

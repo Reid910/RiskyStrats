@@ -25,7 +25,19 @@ local DEFAULT_DATA = {
 	skins = {}, -- Array of owned skin IDs
 	selectedSkin = nil,
 	gamesPlayed = 0,
-	lastPlayed = 0
+	lastPlayed = 0,
+	settings = {
+		birdsEyeView = false,
+		gameStartNotification = true,
+		playing = true,
+	},
+}
+
+-- Valid settings and their expected types (for validation)
+local VALID_SETTINGS = {
+	birdsEyeView = "boolean",
+	gameStartNotification = "boolean",
+	playing = "boolean",
 }
 
 -- DataStore reference
@@ -71,6 +83,15 @@ function PlayerData.LoadData(player)
 		-- Merge loaded data with defaults (in case new fields were added)
 		for k, v in pairs(result) do
 			data[k] = v
+		end
+
+		-- Deep merge settings so new setting keys auto-populate
+		if data.settings and DEFAULT_DATA.settings then
+			for key, defaultValue in pairs(DEFAULT_DATA.settings) do
+				if data.settings[key] == nil then
+					data.settings[key] = defaultValue
+				end
+			end
 		end
 	elseif not success then
 		warn(`Failed to load data for {player.Name}: {result}`)
@@ -162,6 +183,36 @@ function PlayerData.RemovePoints(player, amount)
 	local data = PlayerData.GetData(player)
 	if data then
 		data.points = math.max(0, data.points - amount)
+		return true
+	end
+	return false
+end
+
+--[[
+	SETTINGS FUNCTIONS
+]]
+
+function PlayerData.GetSettings(player)
+	local data = PlayerData.GetData(player)
+	if data then
+		return data.settings
+	end
+	return nil
+end
+
+function PlayerData.UpdateSetting(player, settingName, value)
+	local expectedType = VALID_SETTINGS[settingName]
+	if not expectedType then
+		warn(`Invalid setting name: {settingName}`)
+		return false
+	end
+	if type(value) ~= expectedType then
+		warn(`Invalid type for {settingName}: expected {expectedType}, got {type(value)}`)
+		return false
+	end
+	local data = PlayerData.GetData(player)
+	if data and data.settings then
+		data.settings[settingName] = value
 		return true
 	end
 	return false

@@ -68,10 +68,11 @@ function Troops.SendTroops(player, fromNodeIds, toNodeId, amount)
 			continue
 		end
 
-		-- Check if player owns this node
+		-- Check if player owns this node OR has troops there (contested node)
 		local owner = Team.GetNodeOwner(fromNodeId)
-		if owner ~= playerTeam then
-			warn(`Player {player.Name} doesn't own node {fromNodeId}`)
+		local playerTroopsOnNode = Team.GetNodeTroops(fromNodeId, playerTeam)
+		if owner ~= playerTeam and playerTroopsOnNode <= 0 then
+			warn(`Player {player.Name} has no troops on node {fromNodeId}`)
 			continue
 		end
 
@@ -80,14 +81,15 @@ function Troops.SendTroops(player, fromNodeIds, toNodeId, amount)
 			continue
 		end
 
-		-- Calculate troops to send (leave at least 1)
+		-- Calculate troops to send
 		local currentTroops = Team.GetNodeTroops(fromNodeId, playerTeam)
-		if currentTroops <= 1 then
+		if currentTroops < 1 then
 			continue
 		end
 
-		-- Send as much as possible up to the requested amount (leave 1 behind)
-		local troopsToSend = math.min(amount, currentTroops - 1)
+		-- On owned nodes, leave at least 1 behind; on contested nodes, can send all
+		local minKeep = (owner == playerTeam) and 1 or 0
+		local troopsToSend = math.min(amount, currentTroops - minKeep)
 
 		if troopsToSend < 1 then
 			continue
@@ -177,35 +179,71 @@ function Troops.RetreatTroops(player, centerX, centerZ, radius)
 			troop.toNode = oldFromNode
 			troop.progress = 1 - troop.progress
 
-			-- Build new remaining path back to origin
-			-- Current remainingPath was leading forward, now we need to go back
-			-- The troop will head to oldFromNode, then needs path back to origin
-			local originNode = MapGeneration.GetNodeById(troop.originNodeId)
-			if originNode and oldFromNode.id ~= troop.originNodeId then
-				-- Need to pathfind from oldFromNode back to origin
-				local pathBack = AStar.FindPath(oldFromNode, originNode, MapGeneration)
-				if pathBack and #pathBack >= 2 then
-					-- Skip first node (that's oldFromNode, which is now toNode)
-					local newRemaining = {}
-					for i = 2, #pathBack do
-						table.insert(newRemaining, pathBack[i])
-					end
-					troop.remainingPath = newRemaining
-				else
-					-- Direct path or can't find path, just go to oldFromNode
-					troop.remainingPath = {}
-				end
-			else
-				-- Already heading to origin or at origin
-				troop.remainingPath = {}
-			end
-
-			-- Update destination to origin
-			troop.finalDestId = troop.originNodeId
-			-- Swap origin to the old destination (in case they retreat again)
+			-- Just go to the node we came from, no pathfinding
+			troop.remainingPath = {}
+			troop.finalDestId = oldFromNode.id
 			troop.originNodeId = oldToNode.id
 
 			retreatedCount = retreatedCount + 1
+		end
+	end
+end
+
+--[[
+	Combine friendly troops going to the same destination when within range
+	Merges smaller troop into larger troop (keeps bigger troop's ID)
+]]
+local function CombineTroops()
+	-- Distance in map units (multiply by expansion for world studs)
+	-- 0.2 map units = ~1 world stud with expansion of 5
+	local COMBINE_DISTANCE_SQ = 0.2 * 0.2
+
+	-- Build list of troops to remove after combining
+	local troopsToRemove = {}
+
+	for i, troopA in ipairs(Troops.Moving) do
+		if troopsToRemove[i] then continue end
+
+		for j, troopB in ipairs(Troops.Moving) do
+			if i >= j then continue end
+			if troopsToRemove[j] then continue end
+
+			-- Must be same team and same destination
+			if troopA.team ~= troopB.team then continue end
+			if troopA.finalDestId ~= troopB.finalDestId then continue end
+
+			-- Calculate current positions
+			local posAX = troopA.fromNode.x + (troopA.toNode.x - troopA.fromNode.x) * troopA.progress
+			local posAZ = troopA.fromNode.z + (troopA.toNode.z - troopA.fromNode.z) * troopA.progress
+			local posBX = troopB.fromNode.x + (troopB.toNode.x - troopB.fromNode.x) * troopB.progress
+			local posBZ = troopB.fromNode.z + (troopB.toNode.z - troopB.fromNode.z) * troopB.progress
+
+			local dx = posAX - posBX
+			local dz = posAZ - posBZ
+			local distSq = dx * dx + dz * dz
+
+			if distSq <= COMBINE_DISTANCE_SQ then
+				-- Merge smaller into larger (keep larger troop's ID and position)
+				local larger, smaller, smallerIdx
+				if troopA.troopCount >= troopB.troopCount then
+					larger, smaller, smallerIdx = troopA, troopB, j
+				else
+					larger, smaller, smallerIdx = troopB, troopA, i
+				end
+
+				-- Combine into larger troop
+				larger.troopCount = larger.troopCount + smaller.troopCount
+				-- Recalculate speed based on new troop count (larger armies move slower)
+				larger.speed = TroopConfig.GetTroopSpeed(larger.troopCount)
+				troopsToRemove[smallerIdx] = true
+			end
+		end
+	end
+
+	-- Remove combined troops (iterate backwards to preserve indices)
+	for i = #Troops.Moving, 1, -1 do
+		if troopsToRemove[i] then
+			table.remove(Troops.Moving, i)
 		end
 	end
 end
@@ -272,7 +310,10 @@ end
 	Update all moving troops
 ]]
 function Troops.UpdateMovingTroops(deltaTime)
-	-- Check for collisions first
+	-- Combine nearby friendly troops going to same destination
+	CombineTroops()
+
+	-- Check for collisions with enemy troops
 	CheckTroopCollisions()
 
 	for i = #Troops.Moving, 1, -1 do

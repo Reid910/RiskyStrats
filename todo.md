@@ -1,15 +1,15 @@
-- add a menu for between matches - current
-- map + gamemode voting
-- top bar showing % of map owned
-- troops combine if going to the same end goal node, and within distance
-- make buildings take time to build
-- make it so i can also select nodes that have my troops in a battle
-- update building model colors, and change model when building changes + updates color on ownership change
-- fix minor troop network issues ( seeing troops across the map )
+# next todo
+- make map/ gamemode voting do something ( on server )
 - settings + birds eye
 - add models for factory and capitol
 - game start notification
 - coop other players
+
+- make buildings take time to build
+
+- rework Map generation ( for sym maps and other )
+
+- reread and rework all of the scripts to verify logic
 
 ### later
 - cyl inside selection ( easier to see? )
@@ -23,3 +23,7 @@
 - auto tournament setup for weekends - rewards skins + levels?
 - trade skins?
 - mini ai bots ( like civ barbarians )
+
+### bugs to fix
+- pathfinding going to unowned nodes
+- pathfinding

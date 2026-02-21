@@ -339,13 +339,16 @@ local function VerifyConnectivity()
 	return mainArea, otherAreas
 end
 
-local function AssignTeamSpawns()
+local function AssignTeamSpawns(activeTeams)
 	-- Find nodes that are far apart to use as spawns
 	local allNodes = MapGeneration.GetAllNodes()
 	if #allNodes < 2 then
 		warn("Not enough nodes to assign spawns")
 		return
 	end
+
+	-- Default to all teams if not specified
+	activeTeams = activeTeams or {"Red", "Blue", "Green", "Yellow"}
 
 	-- Find the center of the map
 	local centerX, centerZ = 0, 0
@@ -397,34 +400,26 @@ local function AssignTeamSpawns()
 		return furthest
 	end
 
-	-- Note: Neutral nodes start with no troops (they're neutral)
-	-- Teams will need to capture them
+	-- Map team names to quadrants
+	local teamQuadrants = {
+		Red = quadrants.topRight,
+		Blue = quadrants.bottomLeft,
+		Green = quadrants.topLeft,
+		Yellow = quadrants.bottomRight,
+	}
 
-	-- Assign spawn nodes
-	local redSpawn = GetFurthestNode(quadrants.topRight)
-	local blueSpawn = GetFurthestNode(quadrants.bottomLeft)
-	local greenSpawn = GetFurthestNode(quadrants.topLeft)
-	local yellowSpawn = GetFurthestNode(quadrants.bottomRight)
-
-	if redSpawn then
-		Team.SetSpawnNode("Red", redSpawn.id)
-		Team.SetNodeTroops(redSpawn.id, 100, "Red")
+	-- Only assign spawn nodes for active teams
+	for _, teamName in ipairs(activeTeams) do
+		local quadrant = teamQuadrants[teamName]
+		if quadrant then
+			local spawnNode = GetFurthestNode(quadrant)
+			if spawnNode then
+				Team.SetSpawnNode(teamName, spawnNode.id)
+				Team.SetNodeTroops(spawnNode.id, 100, teamName)
+				print(`Assigned {teamName} spawn to node {spawnNode.id}`)
+			end
+		end
 	end
-	if blueSpawn then
-		Team.SetSpawnNode("Blue", blueSpawn.id)
-		Team.SetNodeTroops(blueSpawn.id, 100, "Blue")
-	end
-	if greenSpawn then
-		Team.SetSpawnNode("Green", greenSpawn.id)
-		Team.SetNodeTroops(greenSpawn.id, 100, "Green")
-	end
-	if yellowSpawn then
-		Team.SetSpawnNode("Yellow", yellowSpawn.id)
-		Team.SetNodeTroops(yellowSpawn.id, 100, "Yellow")
-	end
-
-	-- Debug output
-	-- print(`[DEBUG] Assigned spawns: Red={redSpawn and redSpawn.id or "none"}, Blue={blueSpawn and blueSpawn.id or "none"}, Green={greenSpawn and greenSpawn.id or "none"}, Yellow={yellowSpawn and yellowSpawn.id or "none"}`)
 end
 
 --[[
@@ -444,7 +439,7 @@ function MapGeneration.ClearMap()
 	table.clear(State.NodesByChunk)
 end
 
-function MapGeneration.Generate(size)
+function MapGeneration.Generate(size, activeTeams)
 	size = size or 10
 
 	MapGeneration.ClearMap()
@@ -495,8 +490,8 @@ function MapGeneration.Generate(size)
 	-- Verify connectivity
 	VerifyConnectivity()
 
-	-- Assign spawn nodes for teams
-	AssignTeamSpawns()
+	-- Assign spawn nodes for active teams only
+	AssignTeamSpawns(activeTeams)
 
 	State.IsGenerated = true
 
@@ -728,23 +723,9 @@ function MapGeneration.SerializeForPlayer(player, playerTeam)
 	local visibleTroops = {}
 
 	for _, troop in ipairs(Troops.Moving) do
-		-- Check if troop is within info visibility (owned + 1 hop)
-		local isVisible = false
-
-		-- Check fromNode and toNode
-		if infoVisibleNodeIds[troop.fromNode.id] or infoVisibleNodeIds[troop.toNode.id] then
-			isVisible = true
-		end
-
-		-- Check remaining path nodes
-		if not isVisible then
-			for _, pathNode in ipairs(troop.remainingPath) do
-				if infoVisibleNodeIds[pathNode.id] then
-					isVisible = true
-					break
-				end
-			end
-		end
+		-- Check if troop's current segment is within info visibility
+		-- Both fromNode AND toNode must be visible to prevent seeing troops from fog of war
+		local isVisible = infoVisibleNodeIds[troop.fromNode.id] and infoVisibleNodeIds[troop.toNode.id]
 
 		if isVisible then
 			-- Serialize remaining path to coordinates

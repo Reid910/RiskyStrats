@@ -9,42 +9,41 @@ local Team = {
 
 -- Reference to ServerModule (set during Init)
 local ServerModule = nil
+local MapGeneration = nil
 
 -- Callback for when a team is eliminated (loses their Capitol)
 local OnTeamEliminatedCallback = nil
 
+-- Callback for when map ownership changes
+local OnOwnershipChangedCallback = nil
+
 -- Track eliminated teams
 local EliminatedTeams = {}
 
--- Team data structure
+-- Team data structure (colors in shared TeamColors module)
 local Teams = {
 	Red = {
 		name = "Red",
-		color = Color3.fromRGB(255, 85, 85),
 		ownedNodes = {}, -- Array of node IDs owned by this team
 		spawnNodeId = nil,
 	},
 	Blue = {
 		name = "Blue",
-		color = Color3.fromRGB(85, 170, 255),
 		ownedNodes = {},
 		spawnNodeId = nil,
 	},
 	Green = {
 		name = "Green",
-		color = Color3.fromRGB(85, 255, 127),
 		ownedNodes = {},
 		spawnNodeId = nil,
 	},
 	Yellow = {
 		name = "Yellow",
-		color = Color3.fromRGB(255, 255, 127),
 		ownedNodes = {},
 		spawnNodeId = nil,
 	},
 	Neutral = {
 		name = "Neutral",
-		color = Color3.fromRGB(180, 180, 180),
 		ownedNodes = {},
 		spawnNodeId = nil,
 	},
@@ -55,6 +54,17 @@ local NodeOwnership = {}
 
 -- Node troop counts (maps nodeId -> { teamName = count, ... })
 local NodeTroops = {}
+
+--[[
+	LIFECYCLE
+]]
+
+function Team.Init()
+	-- Get reference to modules from Packager
+	local Packager = require(game.ReplicatedStorage.Packager)
+	ServerModule = Packager.Get("ServerModule")
+	MapGeneration = Packager.Get("MapGeneration")
+end
 
 --[[
 	TEAM MANAGEMENT
@@ -92,6 +102,44 @@ function Team.SetOnTeamEliminated(callback)
 end
 
 --[[
+	Set callback for when map ownership changes
+	@param callback - function(ownershipData: { Red = %, Blue = %, Green = %, Yellow = %, Neutral = % })
+]]
+function Team.SetOnOwnershipChanged(callback)
+	OnOwnershipChangedCallback = callback
+end
+
+--[[
+	Get map ownership percentages for each team
+	@return { Red = %, Blue = %, Green = %, Yellow = %, Neutral = % }
+]]
+function Team.GetMapOwnership()
+	local totalNodes = MapGeneration and #MapGeneration.GetAllNodes() or 0
+	if totalNodes == 0 then
+		return { Red = 0, Blue = 0, Green = 0, Yellow = 0, Neutral = 100 }
+	end
+
+	local ownership = {
+		Red = #Teams.Red.ownedNodes,
+		Blue = #Teams.Blue.ownedNodes,
+		Green = #Teams.Green.ownedNodes,
+		Yellow = #Teams.Yellow.ownedNodes,
+	}
+
+	-- Calculate percentages
+	local totalOwned = ownership.Red + ownership.Blue + ownership.Green + ownership.Yellow
+	local neutral = totalNodes - totalOwned
+
+	return {
+		Red = (ownership.Red / totalNodes) * 100,
+		Blue = (ownership.Blue / totalNodes) * 100,
+		Green = (ownership.Green / totalNodes) * 100,
+		Yellow = (ownership.Yellow / totalNodes) * 100,
+		-- Neutral = (neutral / totalNodes) * 100,
+	}
+end
+
+--[[
 	Check if a team is eliminated
 ]]
 function Team.IsTeamEliminated(teamName)
@@ -112,6 +160,25 @@ function Team.GetActiveTeams()
 		end
 	end
 	return active
+end
+
+--[[
+	Clear all ownership for a team (used when team is eliminated or player disconnects)
+	Resets all nodes owned by the team to neutral
+]]
+function Team.ClearTeamOwnership(teamName)
+	local teamData = Teams[teamName]
+	if not teamData then return end
+
+	-- Copy the array since SetNodeOwner modifies it during iteration
+	local nodesToClear = {}
+	for _, nodeId in ipairs(teamData.ownedNodes) do
+		table.insert(nodesToClear, nodeId)
+	end
+
+	for _, nodeId in ipairs(nodesToClear) do
+		Team.SetNodeOwner(nodeId, nil)
+	end
 end
 
 --[[
@@ -164,6 +231,11 @@ function Team.SetNodeOwner(nodeId, teamName)
 				end
 			end
 		end
+	end
+
+	-- Notify ownership changed callback
+	if OnOwnershipChangedCallback and (previousOwner ~= teamName) then
+		OnOwnershipChangedCallback(Team.GetMapOwnership())
 	end
 end
 
@@ -388,19 +460,6 @@ function Team.SerializeForClient()
 			Yellow = Teams.Yellow.spawnNodeId,
 		}
 	}
-end
-
---[[
-	LIFECYCLE
-]]
-
-function Team.Init()
-	-- Get reference to ServerModule from Packager
-	local Packager = require(game.ReplicatedStorage.Packager)
-	ServerModule = Packager.Get("ServerModule")
-end
-
-function Team.Start()
 end
 
 return Team

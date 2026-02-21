@@ -40,6 +40,10 @@ function Player.GetTeam(player)
 	return nil
 end
 
+function Player.ClearTeam(player)
+	player.Team = nil
+end
+
 function Player.IsOnTeam(player, teamName)
 	return Player.GetTeam(player) == teamName
 end

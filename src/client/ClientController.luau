@@ -24,6 +24,9 @@ local CurrentMapData = {
 	playerTeam = nil
 }
 
+-- Spectator mode (set by ClientModule when player has no team)
+local IsSpectator = false
+
 -- Constants
 local SINGLE_SELECT_RANGE = 2.5
 local MAX_CIRCLE_SIZE = 35
@@ -149,14 +152,25 @@ end
 local function SelectNode(node)
 	if SelectionList[node] then return end
 
-	-- Check if player owns this node
+	-- Check if player owns this node OR has troops there (for contested nodes)
 	local nodeId = tonumber(string.match(node.Name, "Node_(%d+)"))
 	if nodeId then
 		local nodeIdStr = tostring(nodeId)
 		local owner = CurrentMapData.nodeOwnership[nodeIdStr]
+		local troops = CurrentMapData.nodeTroops[nodeIdStr]
 
-		-- Only allow selecting nodes owned by player's team
-		if owner ~= CurrentMapData.playerTeam then
+		-- Allow selecting if player owns the node
+		local canSelect = (owner == CurrentMapData.playerTeam)
+
+		-- Also allow selecting if player has troops on this node (contested battles)
+		if not canSelect and troops and type(troops) == "table" then
+			local playerTroops = troops[CurrentMapData.playerTeam]
+			if playerTroops and playerTroops > 0 then
+				canSelect = true
+			end
+		end
+
+		if not canSelect then
 			return
 		end
 	end
@@ -194,7 +208,9 @@ local function PerformSelection()
 		DeselectAll()
 	end
 
-	local dragDist = ZeroY(GetMousePosition()) - ZeroY(MouseDownAt)
+	local MousePos = GetMousePosition()
+	if not MousePos or not MouseDownAt then return end
+	local dragDist = ZeroY(MousePos) - ZeroY(MouseDownAt)
 	local dragDistSq = SquaredMagnitude(dragDist)
 
 	-- Single select
@@ -301,20 +317,28 @@ function ClientController.GetMousePosition()
 	return GetMousePosition()
 end
 
+function ClientController.SetSpectator(spectating)
+	IsSpectator = spectating
+	if spectating then
+		DeselectAll()
+	end
+end
+
 function ClientController.OnMouseDown()
+	if IsSpectator then return end
 	MouseDown = true
 	MouseDownAt = GetMousePosition()
 end
 
 function ClientController.OnMouseUp()
+	if IsSpectator then return end
 	MouseDown = false
 	PerformSelection()
 end
 
 function ClientController.SendTroops(amount)
-	-- Get selected nodes and validate ownership
+	-- Get selected nodes and validate ownership or troop presence
 	local selectedNodeIds = {}
-	local validNodes = {}
 	local invalidNodes = {} -- Track invalid/destroyed node references
 
 	for node, _ in pairs(SelectionList) do
@@ -328,13 +352,23 @@ function ClientController.SendTroops(amount)
 		if nodeId then
 			local nodeIdStr = tostring(nodeId)
 			local owner = CurrentMapData.nodeOwnership[nodeIdStr]
+			local troops = CurrentMapData.nodeTroops[nodeIdStr]
 
-			-- Only include nodes owned by player's team
-			if owner == CurrentMapData.playerTeam then
+			-- Allow sending from owned nodes
+			local canSend = (owner == CurrentMapData.playerTeam)
+
+			-- Also allow sending from contested nodes where player has troops
+			if not canSend and troops and type(troops) == "table" then
+				local playerTroops = troops[CurrentMapData.playerTeam]
+				if playerTroops and playerTroops > 0 then
+					canSend = true
+				end
+			end
+
+			if canSend then
 				table.insert(selectedNodeIds, nodeId)
-				validNodes[nodeId] = CurrentMapData.nodeTroops[nodeIdStr] or 0
 			else
-				warn(`Cannot send from node {nodeId}: not owned by your team`)
+				warn(`Cannot send from node {nodeId}: no troops there`)
 			end
 		end
 	end
@@ -503,23 +537,41 @@ function ClientController.UpdateMapData(mapData)
 			visibleNodeIds[tostring(nodeData.id)] = true
 		end
 
-		-- Update ownership for all visible nodes
+		-- Update ownership and troops for all visible nodes
 		for nodeIdStr, _ in pairs(visibleNodeIds) do
 			local oldOwner = CurrentMapData.nodeOwnership[nodeIdStr]
 			local newOwner = mapData.teamData.nodeOwnership[nodeIdStr]
+			local oldTroops = CurrentMapData.nodeTroops[nodeIdStr]
+			local newTroops = mapData.teamData.nodeTroops[nodeIdStr]
 
 			-- Update ownership
 			CurrentMapData.nodeOwnership[nodeIdStr] = newOwner
 
-			-- If player lost ownership of this node, mark for deselection
-			if oldOwner == CurrentMapData.playerTeam and newOwner ~= CurrentMapData.playerTeam then
+			-- Update troops
+			CurrentMapData.nodeTroops[nodeIdStr] = newTroops
+
+			-- Check if player can still select this node
+			local couldSelectBefore = (oldOwner == CurrentMapData.playerTeam)
+			local canSelectNow = (newOwner == CurrentMapData.playerTeam)
+
+			-- Also check troop presence for contested nodes
+			if not couldSelectBefore and oldTroops and type(oldTroops) == "table" then
+				local oldPlayerTroops = oldTroops[CurrentMapData.playerTeam]
+				if oldPlayerTroops and oldPlayerTroops > 0 then
+					couldSelectBefore = true
+				end
+			end
+			if not canSelectNow and newTroops and type(newTroops) == "table" then
+				local newPlayerTroops = newTroops[CurrentMapData.playerTeam]
+				if newPlayerTroops and newPlayerTroops > 0 then
+					canSelectNow = true
+				end
+			end
+
+			-- If player lost ability to select this node, mark for deselection
+			if couldSelectBefore and not canSelectNow then
 				table.insert(nodesToDeselect, nodeIdStr)
 			end
-		end
-
-		-- Update troops for all visible nodes
-		for nodeIdStr, _ in pairs(visibleNodeIds) do
-			CurrentMapData.nodeTroops[nodeIdStr] = mapData.teamData.nodeTroops[nodeIdStr] or 0
 		end
 
 		-- Clean up data for nodes that are no longer visible (fog of war changes)
@@ -556,6 +608,39 @@ function ClientController.GetCachedTeamData()
 		nodeTroops = CurrentMapData.nodeTroops,
 		playerTeam = CurrentMapData.playerTeam
 	}
+end
+
+--[[
+	Reset all client state (called when a new game starts)
+]]
+function ClientController.Reset()
+	-- Clear all selections
+	DeselectAll()
+
+	-- Reset mouse state
+	MouseDown = false
+	MouseDownAt = nil
+
+	-- Clear target indicator
+	if SingleTargetModel then
+		SingleTargetModel:Destroy()
+		SingleTargetModel = nil
+	end
+
+	-- Clear circle selection parts
+	for _, part in pairs(CircleSelectParts) do
+		if part and part.Parent then
+			part:Destroy()
+		end
+	end
+	CircleSelectParts = {}
+
+	-- Clear cached map data
+	CurrentMapData.nodeOwnership = {}
+	CurrentMapData.nodeTroops = {}
+	-- Keep playerTeam as it will be updated by team assignment
+
+	print("[ClientController] Reset complete")
 end
 
 return ClientController

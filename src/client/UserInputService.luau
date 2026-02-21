@@ -49,7 +49,7 @@ function InputModule.Start()
 			-- Check if Alt key is held
 			local altHeld = UIS:IsKeyDown(Enum.KeyCode.LeftAlt) or UIS:IsKeyDown(Enum.KeyCode.RightAlt)
 
-			if altHeld then
+			if altHeld or UIS:IsKeyDown(Enum.KeyCode.Four) then
 				-- Alt+click - retreat troops
 				ClientController.RetreatTroops()
 			else

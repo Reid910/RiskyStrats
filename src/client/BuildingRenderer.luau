@@ -10,10 +10,12 @@ local BuildingRenderer = {
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local TeamColors = require(ReplicatedStorage.Shared.TeamColors)
+
 local Packager = nil
 local BuildingConfig = nil
 
--- Track created building visuals: [nodeId] = Model or Part
+-- Track created building visuals: [nodeId] = { visual = Model or Part, type = string, owner = string }
 local CreatedBuildings = {}
 
 local BuildingsFolder = nil
@@ -40,7 +42,7 @@ end
 --[[
 	Create a building visual
 ]]
-function BuildingRenderer.CreateBuilding(nodeId, buildingType, x, z)
+function BuildingRenderer.CreateBuilding(nodeId, buildingType, x, z, owner)
 	-- Get building config
 	local buildingData = BuildingConfig.GetBuildingType(buildingType)
 	if not buildingData then
@@ -64,15 +66,21 @@ function BuildingRenderer.CreateBuilding(nodeId, buildingType, x, z)
 	local building = Instance.new("Part")
 	building.Name = `Building_{nodeId}`
 	building.Size = buildingData.size
-	-- building.Color = buildingData.color
 	building.Transparency = 0.5
 	building.Position = Vector3.new(x * multiplier, 0, z * multiplier)
 	building.Anchored = true
 	building.CanCollide = false
 	building.Parent = BuildingsFolder
 
-	-- Store reference
-	CreatedBuildings[tostring(nodeId)] = building
+	-- Apply team color
+	BuildingRenderer.ApplyTeamColor(building, owner)
+
+	-- Store reference with metadata
+	CreatedBuildings[tostring(nodeId)] = {
+		visual = building,
+		type = buildingType,
+		owner = owner,
+	}
 end
 
 --[[
@@ -80,9 +88,11 @@ end
 ]]
 function BuildingRenderer.RemoveBuilding(nodeId)
 	local nodeIdStr = tostring(nodeId)
-	local building = CreatedBuildings[nodeIdStr]
-	if building then
-		building:Destroy()
+	local buildingEntry = CreatedBuildings[nodeIdStr]
+	if buildingEntry then
+		if buildingEntry.visual then
+			buildingEntry.visual:Destroy()
+		end
 		CreatedBuildings[nodeIdStr] = nil
 	end
 end
@@ -100,24 +110,44 @@ function BuildingRenderer.SyncBuildings(buildingsData)
 	end
 
 	-- Remove buildings that no longer exist
-	for nodeIdStr, building in pairs(CreatedBuildings) do
+	for nodeIdStr, buildingEntry in pairs(CreatedBuildings) do
 		if not serverBuildingIds[nodeIdStr] then
-			building:Destroy()
+			if buildingEntry.visual then
+				buildingEntry.visual:Destroy()
+			end
 			CreatedBuildings[nodeIdStr] = nil
 		end
 	end
 
-	-- Add new buildings
+	-- Add or update buildings
 	for nodeIdStr, buildingData in pairs(buildingsData) do
-		if not CreatedBuildings[nodeIdStr] then
+		local existingEntry = CreatedBuildings[nodeIdStr]
+		local needsRecreate = false
+
+		if not existingEntry then
+			-- New building
+			needsRecreate = true
+		elseif existingEntry.type ~= buildingData.type then
+			-- Building type changed (swapped)
+			if existingEntry.visual then
+				existingEntry.visual:Destroy()
+			end
+			CreatedBuildings[nodeIdStr] = nil
+			needsRecreate = true
+		elseif existingEntry.owner ~= buildingData.owner then
+			-- Owner changed, update color
+			BuildingRenderer.ApplyTeamColor(existingEntry.visual, buildingData.owner)
+			existingEntry.owner = buildingData.owner
+		end
+
+		if needsRecreate then
 			local nodeId = tonumber(nodeIdStr)
 			if nodeId then
 				local nodePart = Workspace.Nodes:FindFirstChild("Node_" .. nodeId)
 				if nodePart then
-					-- Just use the node's world position directly
 					local x = nodePart.Position.X
 					local z = nodePart.Position.Z
-					BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingData.type, x, z)
+					BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingData.type, x, z, buildingData.owner)
 				end
 			end
 		end
@@ -125,9 +155,30 @@ function BuildingRenderer.SyncBuildings(buildingsData)
 end
 
 --[[
+	Apply team color to a building visual
+]]
+function BuildingRenderer.ApplyTeamColor(visual, owner)
+	if not visual or not owner then return end
+
+	local color = TeamColors[owner]
+	if not color then return end
+
+	-- Apply color to all parts in the model/part
+	if visual:IsA("Model") then
+		for _, descendant in ipairs(visual:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				descendant.Color = color
+			end
+		end
+	elseif visual:IsA("BasePart") then
+		visual.Color = color
+	end
+end
+
+--[[
 	Create a building visual at world position (no multiplier needed)
 ]]
-function BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingType, worldX, worldZ)
+function BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingType, worldX, worldZ, owner)
 	-- Get building config
 	local buildingData = BuildingConfig.GetBuildingType(buildingType)
 	if not buildingData then
@@ -156,7 +207,6 @@ function BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingType, worldX,
 		building = Instance.new("Part")
 		building.Name = `Building_{nodeId}`
 		building.Size = buildingData.size
-		-- building.Color = buildingData.color
 		building.Transparency = 0.5
 		building.Position = position
 		building.Anchored = true
@@ -164,16 +214,25 @@ function BuildingRenderer.CreateBuildingAtWorldPos(nodeId, buildingType, worldX,
 		building.Parent = BuildingsFolder
 	end
 
-	-- Store reference
-	CreatedBuildings[tostring(nodeId)] = building
+	-- Apply team color
+	BuildingRenderer.ApplyTeamColor(building, owner)
+
+	-- Store reference with metadata
+	CreatedBuildings[tostring(nodeId)] = {
+		visual = building,
+		type = buildingType,
+		owner = owner,
+	}
 end
 
 --[[
 	Clear all buildings
 ]]
 function BuildingRenderer.ClearAllBuildings()
-	for _, building in pairs(CreatedBuildings) do
-		building:Destroy()
+	for _, buildingEntry in pairs(CreatedBuildings) do
+		if buildingEntry.visual then
+			buildingEntry.visual:Destroy()
+		end
 	end
 	table.clear(CreatedBuildings)
 end

@@ -1,3 +1,6 @@
+local Rep = game:GetService("ReplicatedStorage")
+local Packager = require(Rep.Packager)
+
 --[[
 	TroopRenderer
 	Handles visual representation of moving troops on the client
@@ -10,25 +13,17 @@ local TroopRenderer = {
 	Name = "TroopRenderer"
 }
 
+local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
+
+local TroopConfig = Packager.Get("TroopConfig")
+
 -- Track all active troop visuals
 local ActiveTroops = {} -- [troopId] = {visual, data}
 local TroopsFolder = nil
 local MapRenderer = nil
 
--- Team colors
-local TeamColors = {
-	Red = Color3.fromRGB(255, 85, 85),
-	Blue = Color3.fromRGB(85, 170, 255),
-	Green = Color3.fromRGB(85, 255, 127),
-	Yellow = Color3.fromRGB(255, 255, 127),
-}
-
 local function GetExpansionMultiplier()
 	return MapRenderer and MapRenderer.GetExpansionMultiplier() or 5
-end
-
-local function Logistic(x, maxValue, steepness, midpoint)
-	return maxValue / (1 + math.exp(-steepness * (x - midpoint)))
 end
 
 local function CreateTroopVisual(team, troopCount)
@@ -46,7 +41,7 @@ local function CreateTroopVisual(team, troopCount)
 
 	-- Size based on troop count (logarithmic scale)
 	-- local size = Logistic(troopCount, 100_000, 0.08, 50_000)
-	local size = math.log(troopCount * troopCount + 1) * 0.05
+	local size = TroopConfig.GetTroopSize(troopCount)
 	local y = size / 3
 	troop.Size = Vector3.new(y, size, size)
 
@@ -93,6 +88,19 @@ function TroopRenderer.Start()
 end
 
 --[[
+	Clear all troop visuals (called when game resets)
+]]
+function TroopRenderer.ClearAllTroops()
+	for _, troop in pairs(ActiveTroops) do
+		if troop.visual then
+			troop.visual:Destroy()
+		end
+	end
+	table.clear(ActiveTroops)
+	print("[TroopRenderer] Cleared all troops")
+end
+
+--[[
 	Sync troops with server state (called from MapUpdate every frame)
 	Server is authoritative - client just displays server position
 ]]
@@ -127,8 +135,30 @@ function TroopRenderer.SyncTroops(serverTroops)
 			troop = {
 				visual = visual,
 				height = y/2,
+				troopCount = troopData.troopCount,
 			}
 			ActiveTroops[troopData.id] = troop
+		end
+
+		-- Check if troop count changed (from combining)
+		if troop.troopCount ~= troopData.troopCount then
+			troop.troopCount = troopData.troopCount
+
+			-- Update size based on new troop count
+			local size = math.log(troopData.troopCount * troopData.troopCount + 1) * 0.05
+			local y = size / 3
+			troop.visual.Size = Vector3.new(y, size, size)
+			troop.height = y / 2
+
+			-- Update label
+			local billboard = troop.visual:FindFirstChildWhichIsA("BillboardGui")
+			if billboard then
+				billboard.StudsOffset = Vector3.new(0, size / 2 + 0.5, 0)
+				local label = billboard:FindFirstChildWhichIsA("TextLabel")
+				if label then
+					label.Text = tostring(troopData.troopCount)
+				end
+			end
 		end
 
 		-- Update position from server state

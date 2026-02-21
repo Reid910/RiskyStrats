@@ -25,6 +25,10 @@ function TroopConfig.GetTroopSpeed(troopCount)
 	return speed
 end
 
+function TroopConfig.GetTroopSize(amt)
+	return math.sqrt(amt/(math.pi*200)) / 2 + 0.1
+end
+
 function TroopConfig.Init()
 end
 
