@@ -23,7 +23,9 @@ local function GetCost(fromNode, toNode, goalNode)
 end
 
 -- Main pathfinding function
-function AStar.FindPath(startNode, endNode, mapGeneration)
+-- canTraverse: optional function(nodeId) -> bool, filters which intermediate nodes can be used
+-- Start and end nodes are always allowed, only intermediate nodes are filtered
+function AStar.FindPath(startNode, endNode, mapGeneration, canTraverse)
 	debug.profilebegin("A* Pathfinding")
 
 	-- Quick checks
@@ -32,7 +34,7 @@ function AStar.FindPath(startNode, endNode, mapGeneration)
 		return {startNode}
 	end
 
-	-- Check if directly connected
+	-- Check if directly connected (no intermediates, so no filtering needed)
 	if table.find(startNode.connections, endNode.id) then
 		debug.profileend()
 		return {startNode, endNode}
@@ -57,6 +59,13 @@ function AStar.FindPath(startNode, endNode, mapGeneration)
 		local connectedNode = mapGeneration.GetNodeById(connectedId)
 		if not connectedNode or connectedNode.deleted then
 			return
+		end
+
+		-- Filter intermediate nodes (end node is always allowed)
+		if canTraverse and connectedId ~= endNode.id then
+			if not canTraverse(connectedId) then
+				return
+			end
 		end
 
 		local currentCost = visited[currentNode.id].cost

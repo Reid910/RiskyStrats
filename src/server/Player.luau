@@ -7,16 +7,11 @@ local Player = {
 	Name = "Player"
 }
 
-local Players = game:GetService("Players")
 local Teams = game:GetService("Teams")
+local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
 
--- Team references
-local TeamInstances = {
-	Red = nil,
-	Blue = nil,
-	Green = nil,
-	Yellow = nil,
-}
+-- Team references (built dynamically)
+local TeamInstances = {}
 
 --[[
 	TEAM MANAGEMENT
@@ -52,12 +47,12 @@ end
 	LIFECYCLE
 ]]
 
-local function CreateTeam(name, color)
+local function CreateTeam(name, brickColorName)
 	local team = Teams:FindFirstChild(name)
 	if not team then
 		team = Instance.new("Team")
 		team.Name = name
-		team.TeamColor = BrickColor.new(color)
+		team.TeamColor = BrickColor.new(brickColorName)
 		team.AutoAssignable = false
 		team.Parent = Teams
 	end
@@ -65,13 +60,10 @@ local function CreateTeam(name, color)
 end
 
 function Player.Init()
-	-- Create all teams
-	TeamInstances.Red = CreateTeam("Red", "Bright red")
-	TeamInstances.Blue = CreateTeam("Blue", "Bright blue")
-	TeamInstances.Green = CreateTeam("Green", "Bright green")
-	TeamInstances.Yellow = CreateTeam("Yellow", "Bright yellow")
-
-	-- print("Teams created: Red, Blue, Green, Yellow")
+	-- Create all teams from TeamColors
+	for _, name in ipairs(TeamColors.GetTeamNames()) do
+		TeamInstances[name] = CreateTeam(name, TeamColors.GetBrickColor(name))
+	end
 end
 
 function Player.Start()

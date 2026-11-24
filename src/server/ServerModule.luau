@@ -1,4 +1,5 @@
 local Packager = require(game.ReplicatedStorage.Packager)
+local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
 
 --[[
 	ServerModule / Game Loop
@@ -38,7 +39,8 @@ local CurrentVotes = {} -- [player] = optionId
 local SelectedGameMode = nil
 local SelectedMapSeed = nil
 
--- Combat configuration
+-- Game configuration
+local NUM_TEAMS = 7 -- Number of teams per game (human + AI fill remaining slots)
 local COMBAT_DAMAGE_RATE = 0.1 -- Troops lost per second per enemy troop present
 
 -- Module references (set in Start)
@@ -49,6 +51,7 @@ local Player = nil
 local Troops = nil
 local Buildings = nil
 local PlayerData = nil
+local AIController = nil
 
 -- Remote references (set in Start)
 local VoteRemote = nil
@@ -60,13 +63,18 @@ local VoteResultRemote = nil
 local ClientReadyResponseRemote = nil
 local PlayerSettingsRemote = nil
 
+-- Network optimization: per-player tracking for delta updates
+local NETWORK_SEND_RATE = 0.1 -- Send updates every 0.1s (~10Hz)
+local NetworkAccumulator = 0
+local LastVisibleNodes = {} -- [player] = {[nodeId] = true}
+
 -- Public function for modules to mark changes (kept for compatibility)
 function ServerModule.MarkNodeChanged(_nodeId)
-	-- No-op: we send full state every frame now
+	-- No-op: delta tracking handles this automatically
 end
 
 function ServerModule.MarkTroopMoving(_troopId, _troopData)
-	-- No-op: we send full state every frame now
+	-- No-op: delta tracking handles this automatically
 end
 
 --[[
@@ -182,12 +190,119 @@ function ServerModule.Init()
 end
 
 --[[
-	Send map data to a player
+	Compare two sets of node IDs for equality
 ]]
-local function SendMapToPlayer(player)
+local function NodeSetsEqual(setA, setB)
+	if not setA or not setB then return false end
+	for id in pairs(setA) do
+		if not setB[id] then return false end
+	end
+	for id in pairs(setB) do
+		if not setA[id] then return false end
+	end
+	return true
+end
+
+--[[
+	Get info-visible node IDs for a player (owned + 1 hop neighbors)
+	Used for fog-of-war filtering of troop events
+]]
+local function GetInfoVisibleNodes(playerTeam)
+	if not playerTeam then return nil end -- Spectator sees all
+
+	local ownedNodes = Team.GetOwnedNodes(playerTeam)
+	local infoVisible = {}
+	for _, nodeId in ipairs(ownedNodes) do
+		infoVisible[nodeId] = true
+		local node = MapGeneration.GetNodeById(nodeId)
+		if node and not node.deleted then
+			for _, connectedId in ipairs(node.connections) do
+				infoVisible[connectedId] = true
+			end
+		end
+	end
+	return infoVisible
+end
+
+--[[
+	Filter troop events for a specific player based on fog-of-war
+]]
+local function FilterTroopEventsForPlayer(events, playerTeam)
+	-- Spectators see everything
+	if not playerTeam then return events end
+
+	local infoVisible = GetInfoVisibleNodes(playerTeam)
+
+	local filtered = {}
+	for _, event in ipairs(events) do
+		if event.type == "clear_all" then
+			table.insert(filtered, event)
+		elseif event.type == "remove" then
+			-- Always send removes (client ignores unknown IDs)
+			table.insert(filtered, event)
+		elseif event.type == "update" then
+			local data = event.data
+			-- Troop is visible if either fromNode or toNode is in info-visible set
+			if infoVisible[data.fromNodeId] or infoVisible[data.toNodeId] then
+				table.insert(filtered, event)
+			end
+		end
+	end
+	return filtered
+end
+
+--[[
+	Send troop events to all players (fog-filtered)
+]]
+local function SendTroopEventsToPlayers(events)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local playerTeam = Player.GetTeam(player)
+		local filtered = FilterTroopEventsForPlayer(events, playerTeam)
+		if #filtered > 0 then
+			NetworkBatch.SendImmediate(NetworkBatch.EventType.TroopMovement, filtered, player)
+		end
+	end
+end
+
+--[[
+	Send full map data to a player (nodes + roads + dynamic data)
+	Used on first send and when fog-of-war visibility changes
+]]
+local function SendFullMapToPlayer(player)
 	local playerTeam = Player.GetTeam(player)
 	local visibleMapData = MapGeneration.SerializeForPlayer(player, playerTeam)
 	NetworkBatch.SendImmediate(NetworkBatch.EventType.MapUpdate, visibleMapData, player)
+
+	-- Track visible nodes for this player
+	local visibleNodeIds = MapGeneration.GetVisibleNodeIds(playerTeam)
+	LastVisibleNodes[player] = visibleNodeIds
+end
+
+--[[
+	Send dynamic-only update to a player (teamData + troops + buildings, no nodes/roads)
+	Used for frequent updates when fog-of-war hasn't changed
+]]
+local function SendDynamicToPlayer(player)
+	local playerTeam = Player.GetTeam(player)
+	local dynamicData = MapGeneration.SerializeDynamicForPlayer(player, playerTeam)
+	NetworkBatch.SendImmediate(NetworkBatch.EventType.MapUpdate, dynamicData, player)
+end
+
+--[[
+	Send the appropriate update to a player (full or dynamic based on fog-of-war changes)
+]]
+local function SendMapToPlayer(player)
+	local playerTeam = Player.GetTeam(player)
+	local currentVisible = MapGeneration.GetVisibleNodeIds(playerTeam)
+	local lastVisible = LastVisibleNodes[player]
+
+	if not lastVisible or not NodeSetsEqual(currentVisible, lastVisible) then
+		-- Fog of war changed (or first send) - send full update with nodes + roads
+		SendFullMapToPlayer(player)
+	else
+		-- No fog change - send only dynamic data
+		SendDynamicToPlayer(player)
+	end
 end
 
 --[[
@@ -312,6 +427,7 @@ function ServerModule.Start()
 	Troops = Packager.Get("Troops")
 	Buildings = Packager.Get("Buildings")
 	PlayerData = Packager.Get("PlayerData")
+	AIController = Packager.Get("AIController")
 
 	-- Register for team elimination events
 	Team.SetOnTeamEliminated(OnTeamEliminated)
@@ -514,7 +630,7 @@ function ServerModule.Start()
 			print(`Map selected: {MapOptions[winningMapId].name} (seed: {SelectedMapSeed})`)
 
 			-- 4. Assign teams to players BEFORE map generation
-			local teamNames = {"Red", "Blue", "Green", "Yellow"}
+			local allTeamNames = TeamColors.GetTeamNames()
 			local playerList = Players:GetPlayers()
 			local activeTeams = {}
 
@@ -527,16 +643,29 @@ function ServerModule.Start()
 				end
 			end
 
+			local usedTeams = {}
 			for i, player in ipairs(playingPlayers) do
-				local teamIndex = ((i - 1) % #teamNames) + 1
-				local teamName = teamNames[teamIndex]
+				local teamIndex = ((i - 1) % NUM_TEAMS) + 1
+				local teamName = allTeamNames[teamIndex]
 				Player.SetTeam(player, teamName)
 				PlayerTeamMap[player] = teamName
 				table.insert(activeTeams, teamName)
+				usedTeams[teamName] = true
 				print(`Assigned {player.Name} to {teamName} team`)
 			end
 
-			-- 5. Setup new game with only active teams
+			-- Fill remaining team slots with AI (up to NUM_TEAMS)
+			local aiTeams = {}
+			for i = 1, NUM_TEAMS do
+				local name = allTeamNames[i]
+				if not usedTeams[name] then
+					table.insert(activeTeams, name)
+					table.insert(aiTeams, name)
+				end
+			end
+			AIController.AssignTeams(aiTeams)
+
+			-- 5. Setup new game with all teams (human + AI)
 			GameState = "Playing"
 			Team.ResetAllTeams()
 			Buildings.ClearAllBuildings()
@@ -559,6 +688,7 @@ function ServerModule.Start()
 
 			-- 8. Handle player disconnects - eliminate their team
 			DisconnectConnection = Players.PlayerRemoving:Connect(function(player)
+				LastVisibleNodes[player] = nil
 				if GameState ~= "Playing" then return end
 				if not PlayerTeamMap[player] then return end
 
@@ -569,8 +699,20 @@ function ServerModule.Start()
 			-- 9. Start combat loop (every frame)
 			CombatConnection = RunService.Heartbeat:Connect(UpdateCombat)
 
-			-- 10. Start network sync (every frame)
-			NetworkConnection = RunService.Heartbeat:Connect(function()
+			-- 10. Start network sync
+			NetworkAccumulator = 0
+			NetworkConnection = RunService.Heartbeat:Connect(function(deltaTime)
+				-- Flush troop events every frame (events only exist when state changes)
+				local troopEvents = Troops.FlushTroopEvents()
+				if #troopEvents > 0 then
+					SendTroopEventsToPlayers(troopEvents)
+				end
+
+				-- Rate-limited map/node updates (~10Hz)
+				NetworkAccumulator += deltaTime
+				if NetworkAccumulator < NETWORK_SEND_RATE then return end
+				NetworkAccumulator -= NETWORK_SEND_RATE
+
 				for _, player in ipairs(Players:GetPlayers()) do
 					SendMapToPlayer(player)
 				end
@@ -601,6 +743,8 @@ function ServerModule.Start()
 				DisconnectConnection = nil
 			end
 			PlayerTeamMap = {}
+			LastVisibleNodes = {}
+			AIController.ClearTeams()
 
 			-- 13. Show winner and restart
 			if WinnerTeam then

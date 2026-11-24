@@ -18,17 +18,61 @@ local Packager = nil
 local MapGeneration = nil
 local Team = nil
 local AStar = nil
-local NetworkBatch = nil
-local Player = nil
 local TroopConfig = nil
+
+-- Event buffer: troop state changes queued each frame, flushed by ServerModule
+local TroopEventBuffer = {} -- Array of {type, data}
+
+--[[
+	Serialize a moving troop into event data (snapshot at queue time)
+]]
+local function SerializeTroopForEvent(troop)
+	local remainingCoords = {}
+	for _, node in ipairs(troop.remainingPath) do
+		table.insert(remainingCoords, {x = node.x, z = node.z})
+	end
+	return {
+		id = troop.id,
+		team = troop.team,
+		troopCount = math.floor(troop.troopCount),
+		fromNodeId = troop.fromNode.id,
+		toNodeId = troop.toNode.id,
+		fromNode = {x = troop.fromNode.x, z = troop.fromNode.z},
+		toNode = {x = troop.toNode.x, z = troop.toNode.z},
+		remainingPath = remainingCoords,
+		progress = troop.progress,
+		speed = troop.speed,
+	}
+end
+
+local function QueueTroopUpdate(troop)
+	table.insert(TroopEventBuffer, {
+		type = "update",
+		data = SerializeTroopForEvent(troop),
+	})
+end
+
+local function QueueTroopRemove(troopId)
+	table.insert(TroopEventBuffer, {
+		type = "remove",
+		data = {id = troopId},
+	})
+end
+
+--[[
+	Flush all queued troop events (called by ServerModule each frame)
+]]
+function Troops.FlushTroopEvents()
+	local events = TroopEventBuffer
+	TroopEventBuffer = {}
+	return events
+end
 
 function Troops.Init()
 	Packager = require(game.ReplicatedStorage.Packager)
 	MapGeneration = Packager.Get("MapGeneration")
 	Team = Packager.Get("Team")
 	AStar = Packager.Get("AStar")
-	NetworkBatch = Packager.Get("NetworkBatch")
-	Player = Packager.Get("Player")
 	TroopConfig = Packager.Get("TroopConfig")
 end
 
@@ -44,23 +88,18 @@ end
 	@param toNodeId - Target node ID
 	@param amount - Flat amount of troops to send from each node (sends as much as possible up to this amount)
 ]]
-function Troops.SendTroops(player, fromNodeIds, toNodeId, amount)
-	if not player or not player.Team then
-		warn("Player has no team")
-		return
-	end
+--[[
+	Core troop sending logic shared by player and AI
+]]
+local function SendTroopsInternal(teamName, fromNodeIds, toNodeId, amount)
+	amount = amount or 999999
 
-	local playerTeam = player.Team.Name
-	amount = amount or 999999 -- Default to sending all available
-
-	-- Validate target node
 	local targetNode = MapGeneration.GetNodeById(toNodeId)
 	if not targetNode then
 		warn(`Target node {toNodeId} not found`)
 		return
 	end
 
-	-- Process each source node
 	for _, fromNodeId in ipairs(fromNodeIds) do
 		local sourceNode = MapGeneration.GetNodeById(fromNodeId)
 		if not sourceNode then
@@ -68,74 +107,85 @@ function Troops.SendTroops(player, fromNodeIds, toNodeId, amount)
 			continue
 		end
 
-		-- Check if player owns this node OR has troops there (contested node)
 		local owner = Team.GetNodeOwner(fromNodeId)
-		local playerTroopsOnNode = Team.GetNodeTroops(fromNodeId, playerTeam)
-		if owner ~= playerTeam and playerTroopsOnNode <= 0 then
-			warn(`Player {player.Name} has no troops on node {fromNodeId}`)
+		local troopsOnNode = Team.GetNodeTroops(fromNodeId, teamName)
+		if owner ~= teamName and troopsOnNode <= 0 then
 			continue
 		end
 
-		-- Don't send to self
 		if fromNodeId == toNodeId then
 			continue
 		end
 
-		-- Calculate troops to send
-		local currentTroops = Team.GetNodeTroops(fromNodeId, playerTeam)
+		local currentTroops = Team.GetNodeTroops(fromNodeId, teamName)
 		if currentTroops < 1 then
 			continue
 		end
 
-		-- On owned nodes, leave at least 1 behind; on contested nodes, can send all
-		local minKeep = (owner == playerTeam) and 1 or 0
+		local minKeep = (owner == teamName) and 1 or 0
 		local troopsToSend = math.min(amount, currentTroops - minKeep)
 
 		if troopsToSend < 1 then
 			continue
 		end
 
-		-- Find path using A*
-		local path = AStar.FindPath(sourceNode, targetNode, MapGeneration)
+		local path = AStar.FindPath(sourceNode, targetNode, MapGeneration, function(nodeId)
+			return Team.GetNodeOwner(nodeId) == teamName
+		end)
 		if not path or #path < 2 then
-			warn(`No path found from node {fromNodeId} to {toNodeId}`)
 			continue
 		end
 
-		-- Remove troops from source node
-		Team.RemoveNodeTroops(fromNodeId, troopsToSend, playerTeam)
+		if #path == 2 and owner ~= teamName then
+			local targetOwner = Team.GetNodeOwner(toNodeId)
+			local ourTroopsOnTarget = Team.GetNodeTroops(toNodeId, teamName)
+			if targetOwner ~= teamName and ourTroopsOnTarget <= 0 then
+				continue
+			end
+		end
 
-		-- Calculate speed based on troop count
+		Team.RemoveNodeTroops(fromNodeId, troopsToSend, teamName)
+
 		local speed = TroopConfig.GetTroopSpeed(troopsToSend)
 
-		-- Build remaining path (nodes after the second one)
 		local remainingPath = {}
 		for i = 3, #path do
 			table.insert(remainingPath, path[i])
 		end
 
-		-- Create moving troop entry with segment-based model
 		local movingTroop = {
-			fromNode = path[1],        -- Starting node
-			toNode = path[2],          -- First destination
-			progress = 0,              -- 0 to 1 along current segment
+			fromNode = path[1],
+			toNode = path[2],
+			progress = 0,
 			remainingPath = remainingPath,
-			originNodeId = fromNodeId, -- Where we started (for retreat)
-			finalDestId = toNodeId,    -- Ultimate destination
-			team = playerTeam,
+			originNodeId = fromNodeId,
+			finalDestId = toNodeId,
+			team = teamName,
 			troopCount = troopsToSend,
 			speed = speed,
 		}
 
-		-- Generate unique ID for this troop movement
-		local troopId = `{playerTeam}_{fromNodeId}_{toNodeId}_{os.clock()}`
+		local troopId = `{teamName}_{fromNodeId}_{toNodeId}_{os.clock()}`
 		movingTroop.id = troopId
 
 		table.insert(Troops.Moving, movingTroop)
+		QueueTroopUpdate(movingTroop)
 	end
+end
 
-	-- Update fog of war for affected players
-	Troops.UpdateFogOfWarForNodes(fromNodeIds)
+function Troops.SendTroops(player, fromNodeIds, toNodeId, amount)
+	if not player or not player.Team then
+		warn("Player has no team")
+		return
+	end
+	SendTroopsInternal(player.Team.Name, fromNodeIds, toNodeId, amount)
+end
+
+--[[
+	Send troops for an AI-controlled team (no player object needed)
+]]
+function Troops.SendTroopsForTeam(teamName, fromNodeIds, toNodeId, amount)
+	SendTroopsInternal(teamName, fromNodeIds, toNodeId, amount)
 end
 
 --[[
@@ -184,6 +234,7 @@ function Troops.RetreatTroops(player, centerX, centerZ, radius)
 			troop.finalDestId = oldFromNode.id
 			troop.originNodeId = oldToNode.id
 
+			QueueTroopUpdate(troop)
 			retreatedCount = retreatedCount + 1
 		end
 	end
@@ -236,6 +287,9 @@ local function CombineTroops()
 				-- Recalculate speed based on new troop count (larger armies move slower)
 				larger.speed = TroopConfig.GetTroopSpeed(larger.troopCount)
 				troopsToRemove[smallerIdx] = true
+
+				QueueTroopRemove(smaller.id)
+				QueueTroopUpdate(larger)
 			end
 		end
 	end
@@ -303,6 +357,8 @@ local function CheckTroopCollisions()
 		troop.remainingPath = {}
 		troop.finalDestId = oldFromNode.id
 		troop.originNodeId = oldToNode.id
+
+		QueueTroopUpdate(troop)
 	end
 end
 
@@ -321,6 +377,7 @@ function Troops.UpdateMovingTroops(deltaTime)
 
 		if not troop.fromNode or not troop.toNode then
 			-- Invalid state, remove
+			QueueTroopRemove(troop.id)
 			table.remove(Troops.Moving, i)
 			continue
 		end
@@ -352,15 +409,17 @@ function Troops.UpdateMovingTroops(deltaTime)
 					troop.fromNode = troop.toNode
 					troop.toNode = table.remove(troop.remainingPath, 1)
 					troop.progress = 0
+					QueueTroopUpdate(troop)
 				else
 					-- Can't continue through unowned/enemy territory, stop here
 					Troops.HandleTroopArrival(troop, arrivedNodeId)
+					QueueTroopRemove(troop.id)
 					table.remove(Troops.Moving, i)
-					Troops.UpdateFogOfWarForNodes({arrivedNodeId})
 				end
 			else
 				-- No more nodes, arrived at final destination
 				Troops.HandleTroopArrival(troop, arrivedNodeId)
+				QueueTroopRemove(troop.id)
 				table.remove(Troops.Moving, i)
 			end
 		end
@@ -384,56 +443,13 @@ function Troops.HandleTroopArrival(troop, nodeId)
 	if not currentOwner then
 		Team.SetNodeOwner(nodeId, troop.team)
 	end
-
-	-- Update fog of war for all players who can see this node
-	Troops.UpdateFogOfWarForNodes({nodeId})
-end
-
---[[
-	Update fog of war for all players that can see the affected nodes
-]]
-function Troops.UpdateFogOfWarForNodes(nodeIds)
-	local Players = game:GetService("Players")
-
-	for _, player in ipairs(Players:GetPlayers()) do
-		local playerTeam = Player.GetTeam(player)
-		if not playerTeam then continue end
-
-		-- Check if any of these nodes are visible to this player
-		local ownedNodes = Team.GetOwnedNodes(playerTeam)
-		local visibleNodeIds = {}
-
-		for _, ownedNodeId in ipairs(ownedNodes) do
-			visibleNodeIds[ownedNodeId] = true
-			local node = MapGeneration.GetNodeById(ownedNodeId)
-			if node then
-				for _, connectedId in ipairs(node.connections) do
-					visibleNodeIds[connectedId] = true
-				end
-			end
-		end
-
-		-- Check if any affected node is visible
-		local shouldUpdate = false
-		for _, nodeId in ipairs(nodeIds) do
-			if visibleNodeIds[nodeId] then
-				shouldUpdate = true
-				break
-			end
-		end
-
-		if shouldUpdate then
-			-- Send updated map data
-			local visibleMapData = MapGeneration.SerializeForPlayer(player, playerTeam)
-			NetworkBatch.SendImmediate(NetworkBatch.EventType.MapUpdate, visibleMapData, player)
-		end
-	end
 end
 
 --[[
 	Clear all moving troops (for game reset)
 ]]
 function Troops.ClearAllTroops()
+	table.insert(TroopEventBuffer, {type = "clear_all"})
 	table.clear(Troops.Moving)
 end
 
@@ -443,6 +459,7 @@ end
 function Troops.ClearTeamTroops(teamName)
 	for i = #Troops.Moving, 1, -1 do
 		if Troops.Moving[i].team == teamName then
+			QueueTroopRemove(Troops.Moving[i].id)
 			table.remove(Troops.Moving, i)
 		end
 	end

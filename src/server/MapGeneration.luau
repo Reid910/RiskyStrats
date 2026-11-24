@@ -348,7 +348,7 @@ local function AssignTeamSpawns(activeTeams)
 	end
 
 	-- Default to all teams if not specified
-	activeTeams = activeTeams or {"Red", "Blue", "Green", "Yellow"}
+	activeTeams = activeTeams or require(game.ReplicatedStorage.Shared.TeamColors).GetTeamNames()
 
 	-- Find the center of the map
 	local centerX, centerZ = 0, 0
@@ -561,6 +561,7 @@ function MapGeneration.SerializeForClient()
 			toNode = {x = troop.toNode.x, z = troop.toNode.z},
 			remainingPath = remainingCoords,
 			progress = troop.progress,
+			speed = troop.speed,
 			finalDestId = troop.finalDestId,
 		})
 	end
@@ -596,7 +597,7 @@ function MapGeneration.GetConfig()
 	return Config
 end
 
-function MapGeneration.SerializeForPlayer(player, playerTeam)
+function MapGeneration.SerializeForPlayer(_player, playerTeam)
 	-- Returns only nodes visible to this player (fog of war)
 	-- Players can see nodes owned by their team + connected neighbors
 	-- Spectators (no team) can see everything
@@ -723,9 +724,8 @@ function MapGeneration.SerializeForPlayer(player, playerTeam)
 	local visibleTroops = {}
 
 	for _, troop in ipairs(Troops.Moving) do
-		-- Check if troop's current segment is within info visibility
-		-- Both fromNode AND toNode must be visible to prevent seeing troops from fog of war
-		local isVisible = infoVisibleNodeIds[troop.fromNode.id] and infoVisibleNodeIds[troop.toNode.id]
+		-- Troop is visible if either endpoint is adjacent to owned territory
+		local isVisible = infoVisibleNodeIds[troop.fromNode.id] or infoVisibleNodeIds[troop.toNode.id]
 
 		if isVisible then
 			-- Serialize remaining path to coordinates
@@ -742,6 +742,7 @@ function MapGeneration.SerializeForPlayer(player, playerTeam)
 				toNode = {x = troop.toNode.x, z = troop.toNode.z},
 				remainingPath = remainingCoords,
 				progress = troop.progress,
+				speed = troop.speed,
 				finalDestId = troop.finalDestId,
 			})
 		end
@@ -763,6 +764,125 @@ function MapGeneration.SerializeForPlayer(player, playerTeam)
 		roads = roads,
 		teamData = visibleTeamData,
 		movingTroops = visibleTroops,
+		buildings = visibleBuildings
+	}
+end
+
+--[[
+	Get the set of visible node IDs for a player (for fog-of-war change detection)
+	Returns a table of {[nodeId] = true}
+]]
+function MapGeneration.GetVisibleNodeIds(playerTeam)
+	if not playerTeam then
+		-- Spectator sees everything
+		local allIds = {}
+		for _, node in ipairs(State.Nodes) do
+			if not node.deleted then
+				allIds[node.id] = true
+			end
+		end
+		return allIds
+	end
+
+	local Packager = require(game.ReplicatedStorage.Packager)
+	local Team = Packager.Get("Team")
+
+	local ownedNodes = Team.GetOwnedNodes(playerTeam)
+	local visibleNodeIds = {}
+	local queue = {}
+	local visited = {}
+
+	for _, nodeId in ipairs(ownedNodes) do
+		table.insert(queue, {nodeId = nodeId, distance = 0})
+		visited[nodeId] = true
+		visibleNodeIds[nodeId] = true
+	end
+
+	while #queue > 0 do
+		local current = table.remove(queue, 1)
+		if current.distance < Config.FogOfWarDistance then
+			local node = State.Nodes[current.nodeId]
+			if node and not node.deleted then
+				for _, connectedId in ipairs(node.connections) do
+					if not visited[connectedId] then
+						visited[connectedId] = true
+						visibleNodeIds[connectedId] = true
+						table.insert(queue, {nodeId = connectedId, distance = current.distance + 1})
+					end
+				end
+			end
+		end
+	end
+
+	return visibleNodeIds
+end
+
+--[[
+	Serialize only dynamic data (teamData, troops, buildings) for a player
+	Used for frequent updates where node geometry hasn't changed
+]]
+function MapGeneration.SerializeDynamicForPlayer(_player, playerTeam)
+	local Packager = require(game.ReplicatedStorage.Packager)
+	local Team = Packager.Get("Team")
+	local Buildings = Packager.Get("Buildings")
+
+	-- Troops are now event-driven (not included in periodic updates)
+
+	-- If spectator, return full dynamic data
+	if not playerTeam then
+		return {
+			teamData = Team.SerializeForClient(),
+			buildings = Buildings.SerializeForClient()
+		}
+	end
+
+	-- Build info-visible set (owned + 1 hop)
+	local ownedNodes = Team.GetOwnedNodes(playerTeam)
+	local infoVisibleNodeIds = {}
+	for _, nodeId in ipairs(ownedNodes) do
+		infoVisibleNodeIds[nodeId] = true
+		local node = State.Nodes[nodeId]
+		if node and not node.deleted then
+			for _, connectedId in ipairs(node.connections) do
+				infoVisibleNodeIds[connectedId] = true
+			end
+		end
+	end
+
+	-- Filter team data
+	local teamData = Team.SerializeForClient()
+	local visibleTeamData = {
+		nodeOwnership = {},
+		nodeTroops = {},
+		spawns = teamData.spawns
+	}
+
+	for nodeIdStr, owner in pairs(teamData.nodeOwnership) do
+		local nodeId = tonumber(nodeIdStr)
+		if nodeId and infoVisibleNodeIds[nodeId] then
+			visibleTeamData.nodeOwnership[nodeIdStr] = owner
+		end
+	end
+
+	for nodeIdStr, troops in pairs(teamData.nodeTroops) do
+		local nodeId = tonumber(nodeIdStr)
+		if nodeId and infoVisibleNodeIds[nodeId] then
+			visibleTeamData.nodeTroops[nodeIdStr] = troops
+		end
+	end
+
+	-- Get visible buildings
+	local allBuildings = Buildings.SerializeForClient()
+	local visibleBuildings = {}
+	for nodeIdStr, building in pairs(allBuildings) do
+		local nodeId = tonumber(nodeIdStr)
+		if nodeId and infoVisibleNodeIds[nodeId] then
+			visibleBuildings[nodeIdStr] = building
+		end
+	end
+
+	return {
+		teamData = visibleTeamData,
 		buildings = visibleBuildings
 	}
 end

@@ -159,115 +159,117 @@ function MapRenderer.ClearMap()
 	end
 end
 
+--[[
+	Process team data for a node and return display properties
+]]
+local function GetNodeDisplayProps(nodeIdStr, teamData)
+	local nodeTroops = teamData.nodeTroops and teamData.nodeTroops[nodeIdStr]
+	local owner = teamData.nodeOwnership and teamData.nodeOwnership[nodeIdStr]
+
+	local troopText = "0"
+	local color = TeamColors.Neutral
+	local isContested = false
+	local totalTroops = 0
+	local isGhostNode = false
+
+	if not nodeTroops then
+		isGhostNode = true
+		color = TeamColors.Ghost
+	elseif type(nodeTroops) == "table" then
+		local teamsWithTroops = {}
+		for teamName, count in pairs(nodeTroops) do
+			if count > 0 then
+				table.insert(teamsWithTroops, {name = teamName, count = count})
+				totalTroops = totalTroops + count
+			end
+		end
+
+		if #teamsWithTroops == 0 then
+			troopText = "0"
+			color = TeamColors.Neutral
+		elseif #teamsWithTroops == 1 then
+			local team = teamsWithTroops[1]
+			troopText = tostring(math.floor(team.count))
+			color = TeamColors.GetColor(team.name)
+		else
+			isContested = true
+			color = TeamColors.Contested
+			local lines = {}
+			table.sort(teamsWithTroops, function(a, b) return a.count > b.count end)
+			for _, team in ipairs(teamsWithTroops) do
+				table.insert(lines, team.name .. ": " .. tostring(math.floor(team.count)))
+			end
+			troopText = table.concat(lines, "\n")
+		end
+	elseif nodeTroops and type(nodeTroops) == "number" then
+		troopText = tostring(nodeTroops)
+		totalTroops = nodeTroops
+		color = TeamColors.GetColor(owner)
+	end
+
+	if totalTroops == 0 and owner then
+		color = TeamColors.GetColor(owner)
+	end
+
+	return color, troopText, isContested, isGhostNode
+end
+
 function MapRenderer.RenderMap(mapData)
-	-- mapData should be a table with:
-	-- { nodes = {{id, x, z, color?}, ...}, roads = {{from = {x, z}, to = {x, z}}, ...}, teamData = {...} }
+	-- mapData can be:
+	-- Full update: { nodes, roads, teamData, movingTroops, buildings }
+	-- Dynamic-only: { teamData, movingTroops, buildings } (no nodes/roads)
 
 	local teamData = mapData.teamData or {}
+	local isFullUpdate = mapData.nodes ~= nil
 
-	-- Track which nodes we've seen in this update
-	local seenNodes = {}
+	if isFullUpdate then
+		-- Full update: create/update/remove nodes and rebuild roads
+		local seenNodes = {}
 
-	-- Update or create nodes
-	for _, nodeData in ipairs(mapData.nodes) do
-		local nodeId = nodeData.id
-		seenNodes[nodeId] = true
+		for _, nodeData in ipairs(mapData.nodes) do
+			local nodeId = nodeData.id
+			seenNodes[nodeId] = true
 
-		-- nodeId is already a string from server (consistent with RemoteEvent serialization)
-		local nodeIdStr = tostring(nodeId)
-		local nodeTroops = teamData.nodeTroops and teamData.nodeTroops[nodeIdStr] -- Now a table: {Red = 50, Blue = 30}
-		local owner = teamData.nodeOwnership and teamData.nodeOwnership[nodeIdStr]
+			local nodeIdStr = tostring(nodeId)
+			local color, troopText, isContested, isGhostNode = GetNodeDisplayProps(nodeIdStr, teamData)
 
-		-- Process troop data
-		local troopText = "0"
-		local color = TeamColors.Neutral
-		local isContested = false
-		local totalTroops = 0
-		local isGhostNode = false
+			local updated = MapRenderer.UpdateNode(nodeId, color, troopText, isContested, isGhostNode)
+			if not updated then
+				MapRenderer.CreateNode(nodeData.x, nodeData.z, color, troopText, nodeId, isContested, isGhostNode)
+			end
+		end
 
-		-- Check if this is a ghost node (no troop data from server)
-		if not nodeTroops then
-			isGhostNode = true
-			color = TeamColors.Ghost
-		elseif type(nodeTroops) == "table" then
-			-- Count teams and total troops
-			local teamsWithTroops = {}
-			for teamName, count in pairs(nodeTroops) do
-				if count > 0 then
-					table.insert(teamsWithTroops, {name = teamName, count = count})
-					totalTroops = totalTroops + count
+		-- Remove nodes that no longer exist (fog of war change)
+		for nodeId, nodeData in pairs(CreatedNodes) do
+			if not seenNodes[nodeId] then
+				if nodeData.part and nodeData.part.Parent then
+					nodeData.part:Destroy()
 				end
+				CreatedNodes[nodeId] = nil
 			end
+		end
 
-			if #teamsWithTroops == 0 then
-				-- No troops = neutral node with 0
-				troopText = "0"
-				color = TeamColors.Neutral
-			elseif #teamsWithTroops == 1 then
-				-- Single team owns this node
-				local team = teamsWithTroops[1]
-				troopText = tostring(math.floor(team.count))
-				color = TeamColors.GetColor(team.name)
-			else
-				-- Contested! Multiple teams
-				isContested = true
-				color = TeamColors.Contested
-
-				-- Build multi-line text: "Red: 50\nBlue: 30"
-				local lines = {}
-				-- Sort by troop count (highest first)
-				table.sort(teamsWithTroops, function(a, b) return a.count > b.count end)
-				for _, team in ipairs(teamsWithTroops) do
-					table.insert(lines, team.name .. ": " .. tostring(math.floor(team.count)))
-				end
-				troopText = table.concat(lines, "\n")
+		-- Rebuild roads only on full updates
+		for i = #CreatedRoads, 1, -1 do
+			local road = CreatedRoads[i]
+			if road and road.Parent then
+				road:Destroy()
 			end
-		elseif nodeTroops and type(nodeTroops) == "number" then
-			-- Legacy support: single number
-			troopText = tostring(nodeTroops)
-			totalTroops = nodeTroops
-			color = TeamColors.GetColor(owner)
+			CreatedRoads[i] = nil
 		end
+		table.clear(CreatedRoads)
 
-		-- If no troops but has owner, still show owner color
-		if totalTroops == 0 and owner then
-			color = TeamColors.GetColor(owner)
-		end
-
-		-- Try to update existing node first
-		local updated = MapRenderer.UpdateNode(nodeId, color, troopText, isContested, isGhostNode)
-
-		if not updated then
-			-- Node doesn't exist yet, create it
-			MapRenderer.CreateNode(nodeData.x, nodeData.z, color, troopText, nodeId, isContested, isGhostNode)
-		end
-	end
-
-	-- Remove nodes that no longer exist in the map
-	for nodeId, nodeData in pairs(CreatedNodes) do
-		if not seenNodes[nodeId] then
-			if nodeData.part and nodeData.part.Parent then
-				nodeData.part:Destroy()
+		if mapData.roads then
+			for _, roadData in ipairs(mapData.roads) do
+				MapRenderer.CreateRoad(roadData.from, roadData.to)
 			end
-			CreatedNodes[nodeId] = nil
 		end
-	end
-
-	-- Rebuild roads (roads are cheap to recreate)
-	-- Clear old roads
-	for i = #CreatedRoads, 1, -1 do
-		local road = CreatedRoads[i]
-		if road and road.Parent then
-			road:Destroy()
-		end
-		CreatedRoads[i] = nil
-	end
-	table.clear(CreatedRoads)
-
-	-- Create new roads
-	if mapData.roads then
-		for _, roadData in ipairs(mapData.roads) do
-			MapRenderer.CreateRoad(roadData.from, roadData.to)
+	else
+		-- Dynamic-only update: just update existing node colors/troops
+		for nodeId, _ in pairs(CreatedNodes) do
+			local nodeIdStr = tostring(nodeId)
+			local color, troopText, isContested, isGhostNode = GetNodeDisplayProps(nodeIdStr, teamData)
+			MapRenderer.UpdateNode(nodeId, color, troopText, isContested, isGhostNode)
 		end
 	end
 end

@@ -7,6 +7,8 @@ local Team = {
 	Name = "Team"
 }
 
+local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
+
 -- Reference to ServerModule (set during Init)
 local ServerModule = nil
 local MapGeneration = nil
@@ -20,33 +22,19 @@ local OnOwnershipChangedCallback = nil
 -- Track eliminated teams
 local EliminatedTeams = {}
 
--- Team data structure (colors in shared TeamColors module)
-local Teams = {
-	Red = {
-		name = "Red",
-		ownedNodes = {}, -- Array of node IDs owned by this team
-		spawnNodeId = nil,
-	},
-	Blue = {
-		name = "Blue",
+-- Team data structure built dynamically from TeamColors
+local Teams = {}
+for _, name in ipairs(TeamColors.GetTeamNames()) do
+	Teams[name] = {
+		name = name,
 		ownedNodes = {},
 		spawnNodeId = nil,
-	},
-	Green = {
-		name = "Green",
-		ownedNodes = {},
-		spawnNodeId = nil,
-	},
-	Yellow = {
-		name = "Yellow",
-		ownedNodes = {},
-		spawnNodeId = nil,
-	},
-	Neutral = {
-		name = "Neutral",
-		ownedNodes = {},
-		spawnNodeId = nil,
-	},
+	}
+end
+Teams.Neutral = {
+	name = "Neutral",
+	ownedNodes = {},
+	spawnNodeId = nil,
 }
 
 -- Node ownership data (maps nodeId -> teamName)
@@ -75,18 +63,25 @@ function Team.GetTeamData(teamName)
 end
 
 function Team.GetAllTeams()
-	return {"Red", "Blue", "Green", "Yellow"}
+	return TeamColors.GetTeamNames()
 end
 
 function Team.GetAllTeamsIncludingNeutral()
-	return {"Red", "Blue", "Green", "Yellow", "Neutral"}
+	local teams = {}
+	for _, name in ipairs(TeamColors.GetTeamNames()) do
+		table.insert(teams, name)
+	end
+	table.insert(teams, "Neutral")
+	return teams
 end
 
 function Team.ResetAllTeams()
 	for _, teamName in ipairs(Team.GetAllTeams()) do
 		local teamData = Teams[teamName]
-		table.clear(teamData.ownedNodes)
-		teamData.spawnNodeId = nil
+		if teamData then
+			table.clear(teamData.ownedNodes)
+			teamData.spawnNodeId = nil
+		end
 	end
 	-- Clear ownership, troop data, and eliminated teams
 	NodeOwnership = {}
@@ -103,7 +98,6 @@ end
 
 --[[
 	Set callback for when map ownership changes
-	@param callback - function(ownershipData: { Red = %, Blue = %, Green = %, Yellow = %, Neutral = % })
 ]]
 function Team.SetOnOwnershipChanged(callback)
 	OnOwnershipChangedCallback = callback
@@ -111,32 +105,21 @@ end
 
 --[[
 	Get map ownership percentages for each team
-	@return { Red = %, Blue = %, Green = %, Yellow = %, Neutral = % }
 ]]
 function Team.GetMapOwnership()
 	local totalNodes = MapGeneration and #MapGeneration.GetAllNodes() or 0
 	if totalNodes == 0 then
-		return { Red = 0, Blue = 0, Green = 0, Yellow = 0, Neutral = 100 }
+		return {}
 	end
 
-	local ownership = {
-		Red = #Teams.Red.ownedNodes,
-		Blue = #Teams.Blue.ownedNodes,
-		Green = #Teams.Green.ownedNodes,
-		Yellow = #Teams.Yellow.ownedNodes,
-	}
-
-	-- Calculate percentages
-	local totalOwned = ownership.Red + ownership.Blue + ownership.Green + ownership.Yellow
-	local neutral = totalNodes - totalOwned
-
-	return {
-		Red = (ownership.Red / totalNodes) * 100,
-		Blue = (ownership.Blue / totalNodes) * 100,
-		Green = (ownership.Green / totalNodes) * 100,
-		Yellow = (ownership.Yellow / totalNodes) * 100,
-		-- Neutral = (neutral / totalNodes) * 100,
-	}
+	local ownership = {}
+	for _, teamName in ipairs(Team.GetAllTeams()) do
+		local teamData = Teams[teamName]
+		if teamData then
+			ownership[teamName] = (#teamData.ownedNodes / totalNodes) * 100
+		end
+	end
+	return ownership
 end
 
 --[[
@@ -438,7 +421,6 @@ end
 
 function Team.SerializeForClient()
 	-- Floor troop counts for client display (server keeps decimals for production)
-	-- Now returns per-team troops: nodeTroops[nodeId] = { Red = 50, Blue = 30 }
 	local flooredTroops = {}
 	for nodeIdStr, teamTroops in pairs(NodeTroops) do
 		flooredTroops[nodeIdStr] = {}
@@ -449,16 +431,19 @@ function Team.SerializeForClient()
 		end
 	end
 
-	-- Returns node ownership and troop data for clients
+	-- Build spawns dynamically
+	local spawns = {}
+	for _, teamName in ipairs(Team.GetAllTeams()) do
+		local teamData = Teams[teamName]
+		if teamData and teamData.spawnNodeId then
+			spawns[teamName] = teamData.spawnNodeId
+		end
+	end
+
 	return {
 		nodeOwnership = NodeOwnership,
 		nodeTroops = flooredTroops,
-		spawns = {
-			Red = Teams.Red.spawnNodeId,
-			Blue = Teams.Blue.spawnNodeId,
-			Green = Teams.Green.spawnNodeId,
-			Yellow = Teams.Yellow.spawnNodeId,
-		}
+		spawns = spawns,
 	}
 end
 

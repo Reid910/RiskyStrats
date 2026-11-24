@@ -1,12 +1,14 @@
 local Rep = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Packager = require(Rep.Packager)
 
 --[[
 	TroopRenderer
 	Handles visual representation of moving troops on the client
 
-	Since server sends state every frame, client just displays server position
-	without local simulation. Server is authoritative for movement.
+	Event-driven: server sends troop events (spawn, segment advance, retreat,
+	combine, arrive) and client simulates movement locally between events.
+	Client predicts next segment from remainingPath for smooth node transitions.
 ]]
 
 local TroopRenderer = {
@@ -18,7 +20,8 @@ local TeamColors = require(game.ReplicatedStorage.Shared.TeamColors)
 local TroopConfig = Packager.Get("TroopConfig")
 
 -- Track all active troop visuals
-local ActiveTroops = {} -- [troopId] = {visual, data}
+-- [troopId] = { visual, height, troopCount, team, fromNode, toNode, progress, speed, segmentDistance, remainingPath }
+local ActiveTroops = {}
 local TroopsFolder = nil
 local MapRenderer = nil
 
@@ -40,7 +43,6 @@ local function CreateTroopVisual(team, troopCount)
 	troop.Color = TeamColors[team] or Color3.new(1, 1, 1)
 
 	-- Size based on troop count (logarithmic scale)
-	-- local size = Logistic(troopCount, 100_000, 0.08, 50_000)
 	local size = TroopConfig.GetTroopSize(troopCount)
 	local y = size / 3
 	troop.Size = Vector3.new(y, size, size)
@@ -48,7 +50,7 @@ local function CreateTroopVisual(team, troopCount)
 	-- Add label showing troop count
 	local billboard = Instance.new("BillboardGui")
 	billboard.Size = UDim2.new(5, 20, 0.45, 10)
-	billboard.StudsOffset = Vector3.new(0, size / 2 + 0.5, 0)
+	billboard.StudsOffset = Vector3.new(0, 0.5, 0)
 	billboard.AlwaysOnTop = true
 
 	local label = Instance.new("TextLabel")
@@ -71,6 +73,83 @@ local function CreateTroopVisual(team, troopCount)
 	return troop, y
 end
 
+--[[
+	Calculate segment distance between two coordinate tables
+]]
+local function CalcSegmentDistance(fromNode, toNode)
+	local dx = toNode.x - fromNode.x
+	local dz = toNode.z - fromNode.z
+	return math.sqrt(dx * dx + dz * dz)
+end
+
+--[[
+	Update a troop's visual size and label for a new troop count
+]]
+local function UpdateTroopVisualSize(troop, newCount)
+	if troop.troopCount == newCount then return end
+	troop.troopCount = newCount
+
+	local size = TroopConfig.GetTroopSize(newCount)
+	local y = size / 3
+	troop.visual.Size = Vector3.new(y, size, size)
+	troop.height = y / 2
+
+	local billboard = troop.visual:FindFirstChildWhichIsA("BillboardGui")
+	if billboard then
+		-- billboard.StudsOffset = Vector3.new(0, y + 0.5, 0)
+		local label = billboard:FindFirstChildWhichIsA("TextLabel")
+		if label then
+			label.Text = tostring(newCount)
+		end
+	end
+end
+
+--[[
+	Apply troop data (from event or reconciliation) to an active troop entry
+	Also sets the visual position immediately so it doesn't stay at (0, -100, 0)
+]]
+local function ApplyTroopData(troop, data)
+	troop.fromNode = data.fromNode
+	troop.toNode = data.toNode
+	troop.progress = data.progress or 0
+	troop.speed = data.speed or 0
+	troop.segmentDistance = CalcSegmentDistance(data.fromNode, data.toNode)
+	troop.remainingPath = data.remainingPath or {}
+
+	UpdateTroopVisualSize(troop, data.troopCount)
+
+	-- Set visual position immediately
+	local multiplier = GetExpansionMultiplier()
+	local progress = troop.progress
+	local fromX = data.fromNode.x * multiplier
+	local fromZ = data.fromNode.z * multiplier
+	local toX = data.toNode.x * multiplier
+	local toZ = data.toNode.z * multiplier
+
+	local x = fromX + (toX - fromX) * progress
+	local z = fromZ + (toZ - fromZ) * progress
+
+	troop.visual.Position = Vector3.new(x, troop.height, z)
+end
+
+--[[
+	Create a new active troop from event/reconciliation data
+]]
+local function CreateActiveTroop(data)
+	local visual, y = CreateTroopVisual(data.team, data.troopCount)
+	visual.Parent = TroopsFolder
+
+	local troop = {
+		visual = visual,
+		height = y / 2,
+		troopCount = data.troopCount,
+		team = data.team,
+	}
+
+	ApplyTroopData(troop, data)
+	return troop
+end
+
 function TroopRenderer.Init()
 	-- Create Troops folder
 	TroopsFolder = game.Workspace:FindFirstChild("Troops")
@@ -82,9 +161,43 @@ function TroopRenderer.Init()
 end
 
 function TroopRenderer.Start()
-	-- Get required modules
-	local Packager = require(game.ReplicatedStorage.Packager)
 	MapRenderer = Packager.Get("MapRenderer")
+
+	-- Client-side simulation: move troops locally, predict next segment at nodes
+	RunService.RenderStepped:Connect(function(deltaTime)
+		local multiplier = GetExpansionMultiplier()
+
+		for _, troop in pairs(ActiveTroops) do
+			if not troop.visual or not troop.fromNode or not troop.toNode then continue end
+			if not troop.speed or troop.speed <= 0 then continue end
+			if not troop.segmentDistance or troop.segmentDistance <= 0 then continue end
+
+			-- Advance progress locally
+			troop.progress = troop.progress + (troop.speed * deltaTime) / troop.segmentDistance
+
+			-- Client-side prediction: if we reached the node, advance to next segment
+			if troop.progress >= 1 and troop.remainingPath and #troop.remainingPath > 0 then
+				troop.fromNode = troop.toNode
+				troop.toNode = table.remove(troop.remainingPath, 1)
+				troop.segmentDistance = CalcSegmentDistance(troop.fromNode, troop.toNode)
+				troop.progress = troop.progress - 1 -- Carry over excess progress
+			end
+
+			-- Clamp after prediction (if no more path, stop at node)
+			troop.progress = math.min(1, troop.progress)
+
+			-- Update visual position
+			local fromX = troop.fromNode.x * multiplier
+			local fromZ = troop.fromNode.z * multiplier
+			local toX = troop.toNode.x * multiplier
+			local toZ = troop.toNode.z * multiplier
+
+			local x = fromX + (toX - fromX) * troop.progress
+			local z = fromZ + (toZ - fromZ) * troop.progress
+
+			troop.visual.Position = Vector3.new(x, troop.height, z)
+		end
+	end)
 end
 
 --[[
@@ -97,23 +210,59 @@ function TroopRenderer.ClearAllTroops()
 		end
 	end
 	table.clear(ActiveTroops)
+	-- Keep SimulationConnection alive - it runs for the lifetime of the client
+	-- and handles any new troops that arrive after clearing
 	print("[TroopRenderer] Cleared all troops")
 end
 
 --[[
-	Sync troops with server state (called from MapUpdate every frame)
-	Server is authoritative - client just displays server position
+	Handle troop events from server (event-driven updates)
+	Events: "update" (create/update troop), "remove" (troop gone), "clear_all"
+]]
+function TroopRenderer.HandleTroopEvents(events)
+	for _, event in ipairs(events) do
+		if event.type == "clear_all" then
+			TroopRenderer.ClearAllTroops()
+
+		elseif event.type == "remove" then
+			local troopId = event.data.id
+			local troop = ActiveTroops[troopId]
+			if troop then
+				if troop.visual then
+					troop.visual:Destroy()
+				end
+				ActiveTroops[troopId] = nil
+			end
+
+		elseif event.type == "update" then
+			local data = event.data
+			local troop = ActiveTroops[data.id]
+
+			if not troop then
+				-- New troop
+				troop = CreateActiveTroop(data)
+				ActiveTroops[data.id] = troop
+			else
+				-- Existing troop: update state (segment advance, retreat, combine)
+				ApplyTroopData(troop, data)
+			end
+		end
+	end
+end
+
+--[[
+	Reconcile troops with server state (called on full MapUpdate for fog-of-war changes)
+	Creates newly visible troops, removes no-longer-visible troops.
+	Does NOT snap existing troops (they simulate locally).
 ]]
 function TroopRenderer.SyncTroops(serverTroops)
-	local multiplier = GetExpansionMultiplier()
-
-	-- Build a set of server troop IDs
+	-- Build set of server troop IDs
 	local serverTroopIds = {}
 	for _, troopData in ipairs(serverTroops) do
 		serverTroopIds[troopData.id] = troopData
 	end
 
-	-- Remove troops that no longer exist on server
+	-- Remove troops not on server (no longer visible due to fog change)
 	for troopId, troop in pairs(ActiveTroops) do
 		if not serverTroopIds[troopId] then
 			if troop.visual then
@@ -123,59 +272,11 @@ function TroopRenderer.SyncTroops(serverTroops)
 		end
 	end
 
-	-- Add or update troops from server
+	-- Add troops that just became visible (don't touch existing ones)
 	for _, troopData in ipairs(serverTroops) do
-		local troop = ActiveTroops[troopData.id]
-
-		if not troop then
-			-- New troop, create visual
-			local visual, y = CreateTroopVisual(troopData.team, troopData.troopCount)
-			visual.Parent = TroopsFolder
-
-			troop = {
-				visual = visual,
-				height = y/2,
-				troopCount = troopData.troopCount,
-			}
+		if not ActiveTroops[troopData.id] then
+			local troop = CreateActiveTroop(troopData)
 			ActiveTroops[troopData.id] = troop
-		end
-
-		-- Check if troop count changed (from combining)
-		if troop.troopCount ~= troopData.troopCount then
-			troop.troopCount = troopData.troopCount
-
-			-- Update size based on new troop count
-			local size = math.log(troopData.troopCount * troopData.troopCount + 1) * 0.05
-			local y = size / 3
-			troop.visual.Size = Vector3.new(y, size, size)
-			troop.height = y / 2
-
-			-- Update label
-			local billboard = troop.visual:FindFirstChildWhichIsA("BillboardGui")
-			if billboard then
-				billboard.StudsOffset = Vector3.new(0, size / 2 + 0.5, 0)
-				local label = billboard:FindFirstChildWhichIsA("TextLabel")
-				if label then
-					label.Text = tostring(troopData.troopCount)
-				end
-			end
-		end
-
-		-- Update position from server state
-		if troop.visual and troopData.fromNode and troopData.toNode then
-			local y = troop.height
-			local progress = troopData.progress or 0
-
-			local fromX = troopData.fromNode.x * multiplier
-			local fromZ = troopData.fromNode.z * multiplier
-			local toX = troopData.toNode.x * multiplier
-			local toZ = troopData.toNode.z * multiplier
-
-			-- Interpolate position based on server progress
-			local x = fromX + (toX - fromX) * progress
-			local z = fromZ + (toZ - fromZ) * progress
-
-			troop.visual.Position = Vector3.new(x, y, z)
 		end
 	end
 end

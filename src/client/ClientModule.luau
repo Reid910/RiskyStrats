@@ -73,10 +73,15 @@ function ClientModule.Start()
 		print("[ClientModule] Client reset complete, spectating:", isSpectating)
 	end)
 
-	-- Register callback for map updates
+	-- Register callback for map updates (nodes, teamData, buildings)
 	NetworkBatch.RegisterCallback(NetworkBatch.EventType.MapUpdate, function(mapData)
 		ClientController.UpdateMapData(mapData)
 		MapRenderer.RenderMap(mapData)
+	end)
+
+	-- Register callback for troop events (event-driven, not polled)
+	NetworkBatch.RegisterCallback(NetworkBatch.EventType.TroopMovement, function(troopEvents)
+		TroopRenderer.HandleTroopEvents(troopEvents)
 	end)
 
 	-- Notify server that client is ready

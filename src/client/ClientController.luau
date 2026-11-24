@@ -513,89 +513,89 @@ function ClientController.Start()
 	RunService.RenderStepped:Connect(UpdateTargetVisual)
 end
 
--- Update map data cache and sync troops (called by MapRenderer or ClientModule)
+-- Update map data cache and sync troops (called by ClientModule on MapUpdate)
+-- Handles both full updates (with nodes) and dynamic-only updates (teamData only)
 function ClientController.UpdateMapData(mapData)
-	if mapData and mapData.teamData then
-		-- Sync moving troops with TroopRenderer
-		if mapData.movingTroops then
-			local TroopRenderer = require(game.ReplicatedStorage.Packager).Get("TroopRenderer")
-			TroopRenderer.SyncTroops(mapData.movingTroops)
-		end
+	if not mapData or not mapData.teamData then return end
 
-		-- Sync buildings with BuildingRenderer
-		if mapData.buildings then
-			local BuildingRenderer = require(game.ReplicatedStorage.Packager).Get("BuildingRenderer")
-			BuildingRenderer.SyncBuildings(mapData.buildings)
-		end
+	-- Reconcile troops on full updates only (fog-of-war visibility changes)
+	-- Normal troop updates are event-driven via TroopMovement events
+	if mapData.movingTroops then
+		local TroopRenderer = require(game.ReplicatedStorage.Packager).Get("TroopRenderer")
+		TroopRenderer.SyncTroops(mapData.movingTroops)
+	end
 
-		-- Track nodes that lost ownership to deselect them
-		local nodesToDeselect = {}
+	-- Sync buildings with BuildingRenderer
+	if mapData.buildings then
+		local BuildingRenderer = require(game.ReplicatedStorage.Packager).Get("BuildingRenderer")
+		BuildingRenderer.SyncBuildings(mapData.buildings)
+	end
 
-		-- Create set of all visible node IDs
+	local nodesToDeselect = {}
+	local isFullUpdate = mapData.nodes ~= nil
+
+	if isFullUpdate then
+		-- Full update: rebuild visibility from node list
 		local visibleNodeIds = {}
-		for _, nodeData in ipairs(mapData.nodes or {}) do
+		for _, nodeData in ipairs(mapData.nodes) do
 			visibleNodeIds[tostring(nodeData.id)] = true
-		end
-
-		-- Update ownership and troops for all visible nodes
-		for nodeIdStr, _ in pairs(visibleNodeIds) do
-			local oldOwner = CurrentMapData.nodeOwnership[nodeIdStr]
-			local newOwner = mapData.teamData.nodeOwnership[nodeIdStr]
-			local oldTroops = CurrentMapData.nodeTroops[nodeIdStr]
-			local newTroops = mapData.teamData.nodeTroops[nodeIdStr]
-
-			-- Update ownership
-			CurrentMapData.nodeOwnership[nodeIdStr] = newOwner
-
-			-- Update troops
-			CurrentMapData.nodeTroops[nodeIdStr] = newTroops
-
-			-- Check if player can still select this node
-			local couldSelectBefore = (oldOwner == CurrentMapData.playerTeam)
-			local canSelectNow = (newOwner == CurrentMapData.playerTeam)
-
-			-- Also check troop presence for contested nodes
-			if not couldSelectBefore and oldTroops and type(oldTroops) == "table" then
-				local oldPlayerTroops = oldTroops[CurrentMapData.playerTeam]
-				if oldPlayerTroops and oldPlayerTroops > 0 then
-					couldSelectBefore = true
-				end
-			end
-			if not canSelectNow and newTroops and type(newTroops) == "table" then
-				local newPlayerTroops = newTroops[CurrentMapData.playerTeam]
-				if newPlayerTroops and newPlayerTroops > 0 then
-					canSelectNow = true
-				end
-			end
-
-			-- If player lost ability to select this node, mark for deselection
-			if couldSelectBefore and not canSelectNow then
-				table.insert(nodesToDeselect, nodeIdStr)
-			end
 		end
 
 		-- Clean up data for nodes that are no longer visible (fog of war changes)
 		for nodeIdStr, _ in pairs(CurrentMapData.nodeOwnership) do
 			if not visibleNodeIds[nodeIdStr] then
 				CurrentMapData.nodeOwnership[nodeIdStr] = nil
-				-- Also mark for deselection if it was selected
 				table.insert(nodesToDeselect, nodeIdStr)
 			end
 		end
-
 		for nodeIdStr, _ in pairs(CurrentMapData.nodeTroops) do
 			if not visibleNodeIds[nodeIdStr] then
 				CurrentMapData.nodeTroops[nodeIdStr] = nil
 			end
 		end
+	end
 
-		-- Deselect nodes that player no longer owns or that disappeared
-		for _, nodeIdStr in ipairs(nodesToDeselect) do
-			for node, _ in pairs(SelectionList) do
-				-- Check if this node matches the nodeId exactly (with defensive check)
-				if node and node.Parent and node.Name == "Node_" .. nodeIdStr then
-					DeselectNode(node)
-				end
+	-- Update ownership and troops from teamData
+	for nodeIdStr, newOwner in pairs(mapData.teamData.nodeOwnership) do
+		local oldOwner = CurrentMapData.nodeOwnership[nodeIdStr]
+		local oldTroops = CurrentMapData.nodeTroops[nodeIdStr]
+		local newTroops = mapData.teamData.nodeTroops[nodeIdStr]
+
+		CurrentMapData.nodeOwnership[nodeIdStr] = newOwner
+		CurrentMapData.nodeTroops[nodeIdStr] = newTroops
+
+		-- Check if player lost ability to select this node
+		local couldSelectBefore = (oldOwner == CurrentMapData.playerTeam)
+		local canSelectNow = (newOwner == CurrentMapData.playerTeam)
+
+		if not couldSelectBefore and oldTroops and type(oldTroops) == "table" then
+			local oldPlayerTroops = oldTroops[CurrentMapData.playerTeam]
+			if oldPlayerTroops and oldPlayerTroops > 0 then
+				couldSelectBefore = true
+			end
+		end
+		if not canSelectNow and newTroops and type(newTroops) == "table" then
+			local newPlayerTroops = newTroops[CurrentMapData.playerTeam]
+			if newPlayerTroops and newPlayerTroops > 0 then
+				canSelectNow = true
+			end
+		end
+
+		if couldSelectBefore and not canSelectNow then
+			table.insert(nodesToDeselect, nodeIdStr)
+		end
+	end
+
+	-- Also update troops for nodes that have troop data but weren't in ownership
+	for nodeIdStr, newTroops in pairs(mapData.teamData.nodeTroops) do
+		CurrentMapData.nodeTroops[nodeIdStr] = newTroops
+	end
+
+	-- Deselect nodes that player no longer owns or that disappeared
+	for _, nodeIdStr in ipairs(nodesToDeselect) do
+		for node, _ in pairs(SelectionList) do
+			if node and node.Parent and node.Name == "Node_" .. nodeIdStr then
+				DeselectNode(node)
 			end
 		end
 	end
